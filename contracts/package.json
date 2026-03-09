@@ -1,0 +1,26 @@
+{
+    "name": "nft-marketplace-contracts",
+    "version": "1.0.0",
+    "description": "NFT Marketplace + Launchpad smart contracts for OPNet (Bitcoin L1)",
+    "main": "index.js",
+    "scripts": {
+        "build:nft": "node node_modules/@btc-vision/assemblyscript/bin/asc.js src/nft/index.ts --target nft --measure --uncheckedBehavior never --config asconfig.json",
+        "build:marketplace": "node node_modules/@btc-vision/assemblyscript/bin/asc.js src/marketplace/index.ts --target marketplace --measure --uncheckedBehavior never --config asconfig.json",
+        "build": "npm run build:nft && npm run build:marketplace"
+    },
+    "author": "OPNet NFT Marketplace",
+    "license": "MIT",
+    "type": "module",
+    "dependencies": {
+        "@assemblyscript/loader": "^0.28.9",
+        "@btc-vision/as-bignum": "^0.1.2",
+        "@btc-vision/assemblyscript": "^0.29.2",
+        "@btc-vision/bitcoin": "^6.5.6",
+        "@btc-vision/btc-runtime": "^1.11.0-rc.9",
+        "@btc-vision/opnet-transform": "^1.2.0",
+        "typescript": "^5.9.3"
+    },
+    "resolutions": {
+        "@btc-vision/btc-runtime": "^1.11.0-beta.1"
+    }
+}

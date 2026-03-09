@@ -1,0 +1,4 @@
+{
+    "extends": "@btc-vision/btc-runtime/asconfig.json",
+    "include": ["./**/*.ts"]
+}
