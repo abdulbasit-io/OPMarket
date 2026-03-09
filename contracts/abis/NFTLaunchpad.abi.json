@@ -1,0 +1,185 @@
+{
+    "functions": [
+        {
+            "name": "register",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "nftContract",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "mintPrice",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "paymentToken",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "maxSupply",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "startBlock",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "endBlock",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "royaltyBps",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "maxPerWallet",
+                    "type": "UINT256"
+                }
+            ],
+            "outputs": [
+                {
+                    "name": "success",
+                    "type": "BOOL"
+                }
+            ]
+        },
+        {
+            "name": "mint",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "nftContract",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "quantity",
+                    "type": "UINT256"
+                }
+            ],
+            "outputs": [
+                {
+                    "name": "firstTokenId",
+                    "type": "UINT256"
+                }
+            ]
+        },
+        {
+            "name": "withdraw",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "nftContract",
+                    "type": "ADDRESS"
+                }
+            ],
+            "outputs": [
+                {
+                    "name": "amount",
+                    "type": "UINT256"
+                }
+            ]
+        },
+        {
+            "name": "getCollection",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "nftContract",
+                    "type": "ADDRESS"
+                }
+            ],
+            "outputs": [
+                {
+                    "name": "creator",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "paymentToken",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "mintPrice",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "maxSupply",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "minted",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "startBlock",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "endBlock",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "royaltyBps",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "proceeds",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "maxPerWallet",
+                    "type": "UINT256"
+                }
+            ]
+        },
+        {
+            "name": "getMinted",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "nftContract",
+                    "type": "ADDRESS"
+                }
+            ],
+            "outputs": [
+                {
+                    "name": "minted",
+                    "type": "UINT256"
+                }
+            ]
+        },
+        {
+            "name": "getWalletMintCount",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "nftContract",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "wallet",
+                    "type": "ADDRESS"
+                }
+            ],
+            "outputs": [
+                {
+                    "name": "minted",
+                    "type": "UINT256"
+                }
+            ]
+        }
+    ],
+    "events": []
+}

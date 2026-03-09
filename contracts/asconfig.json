@@ -7,6 +7,10 @@
         "marketplace": {
             "outFile": "build/NFTMarketplace.wasm",
             "use": ["abort=src/marketplace/index/abort"]
+        },
+        "launchpad": {
+            "outFile": "build/NFTLaunchpad.wasm",
+            "use": ["abort=src/launchpad/index/abort"]
         }
     },
     "options": {
