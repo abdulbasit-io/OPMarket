@@ -1,5 +1,9 @@
 {
   "rewrites": [
+    {
+      "source": "/opnet-rpc/:path*",
+      "destination": "https://testnet.opnet.org/:path*"
+    },
     { "source": "/(.*)", "destination": "/index.html" }
   ]
 }

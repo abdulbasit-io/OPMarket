@@ -4,7 +4,9 @@
 import { JSONRpcProvider } from 'opnet';
 import { networks } from '@btc-vision/bitcoin';
 
-const RPC_URL = 'https://testnet.opnet.org';
+// Proxy path rewritten by Vite (dev) and Vercel (prod) to avoid CORS.
+// See vite.config.js proxy and vercel.json rewrites.
+const RPC_URL = '/opnet-rpc';
 
 let _provider = null;
 

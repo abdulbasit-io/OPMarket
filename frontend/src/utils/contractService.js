@@ -24,6 +24,23 @@ const LAUNCHPAD_ABI = NFTLaunchpadAbi;
 const OP20_ABI      = OP20Abi;
 const WBTC_ABI      = TestWBTCAbi;
 
+// Known-correct 4-byte selectors (SHA256 of canonical sig, first 4 bytes, big-endian u32).
+// Sourced from opnet-transform build output. Used to patch any browser-side encoding
+// mismatch before calldata reaches the node.
+const KNOWN_SELECTORS = {
+  // NFTLaunchpad
+  mint:               0xd6155a7e, // mint(uint256,uint256)
+  withdraw:           0x47d5b2f1, // withdraw(uint256)
+  registerCollection: 0x191e34dc, // registerCollection(string,...) — 10 params
+  // NFTMarketplace
+  list:               0x1f723b69, // list(uint256,uint256,uint256,address,address,uint256)
+  buy:                0xea551e19, // buy(uint256)
+  cancel:             0x6c6577b7, // cancel(uint256)
+  // OP20 / TestWBTC
+  increaseAllowance:  0x8d645723, // increaseAllowance(address,uint256)
+  faucet:             0x11092eae, // faucet()
+};
+
 // ── Read-only contract factory ────────────────────────────
 function readContract(address, abi) {
   const p = getProvider();
@@ -123,6 +140,25 @@ async function executeOnChain(contractAddress, abi, method, args, senderAddress)
   const { contract: c, error } = await writeContract(contractAddress, abi, senderAddress);
   if (!c) throw new Error(error);
 
+  // Intercept provider.call to fix selector bytes before they reach the node.
+  // Self-restores after one use to avoid polluting the shared provider.
+  const _origCall = c.provider.call.bind(c.provider);
+  c.provider.call = async function(addr, data, ...rest) {
+    delete c.provider.call; // restore to prototype method immediately
+    if (data && typeof data.length === 'number' && data.length >= 4) {
+      const selNum = (data[0] << 24 | data[1] << 16 | data[2] << 8 | data[3]) >>> 0;
+      const expected = KNOWN_SELECTORS[method];
+      if (expected && selNum !== expected) {
+        console.warn(`[${method}] selector mismatch: got 0x${selNum.toString(16)}, patching to 0x${expected.toString(16)}`);
+        data[0] = (expected >>> 24) & 0xff;
+        data[1] = (expected >>> 16) & 0xff;
+        data[2] = (expected >>>  8) & 0xff;
+        data[3] = (expected       ) & 0xff;
+      }
+    }
+    return _origCall(addr, data, ...rest);
+  };
+
   let sim;
   try {
     sim = await c[method](...args);
@@ -140,6 +176,7 @@ async function executeOnChain(contractAddress, abi, method, args, senderAddress)
   });
   return receipt?.transactionId ?? '(check wallet)';
 }
+
 
 // Convert a u256 property to a 0x-prefixed 32-byte hex string.
 // Used for addresses stored on-chain so they match CONTRACTS.* keys in constants.

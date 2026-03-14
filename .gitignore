@@ -4,4 +4,5 @@ contracts/node_modules/
 *.local
 deploy-nft.mjs
 contracts/build/
-frontend/dist
+dist/
+frontend/dist/

@@ -7,6 +7,13 @@ export default defineConfig({
   server: {
     port: 5174,
     open: false,
+    proxy: {
+      '/opnet-rpc': {
+        target: 'https://testnet.opnet.org',
+        changeOrigin: true,
+        rewrite: path => path.replace(/^\/opnet-rpc/, ''),
+      },
+    },
   },
   resolve: {
     alias: {
