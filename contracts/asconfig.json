@@ -1,16 +1,12 @@
 {
     "targets": {
-        "nft": {
-            "outFile": "build/BaseNFT.wasm",
-            "use": ["abort=src/nft/index/abort"]
+        "launchpad": {
+            "outFile": "build/NFTLaunchpad.wasm",
+            "use": ["abort=src/launchpad/index/abort"]
         },
         "marketplace": {
             "outFile": "build/NFTMarketplace.wasm",
             "use": ["abort=src/marketplace/index/abort"]
-        },
-        "launchpad": {
-            "outFile": "build/NFTLaunchpad.wasm",
-            "use": ["abort=src/launchpad/index/abort"]
         }
     },
     "options": {

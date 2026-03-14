@@ -7,7 +7,7 @@ import MarketplacePage from './pages/MarketplacePage';
 import MyNFTsPage from './pages/MyNFTsPage';
 import LaunchPage from './pages/LaunchPage';
 import CollectionPage from './pages/CollectionPage';
-import DeployPage from './pages/DeployPage';
+import FaucetPage from './pages/FaucetPage';
 
 export default function App() {
   return (
@@ -20,9 +20,9 @@ export default function App() {
               <Route path="/"            element={<LandingPage />}    />
               <Route path="/marketplace"        element={<MarketplacePage />} />
               <Route path="/launch"            element={<LaunchPage />}      />
-              <Route path="/collection/:addr"  element={<CollectionPage />}  />
+              <Route path="/collection/:id"    element={<CollectionPage />}  />
               <Route path="/my-nfts"           element={<MyNFTsPage />}      />
-              <Route path="/deploy"            element={<DeployPage />}      />
+              <Route path="/faucet"           element={<FaucetPage />}      />
               {/* fallback */}
               <Route path="*"            element={<LandingPage />}    />
             </Routes>

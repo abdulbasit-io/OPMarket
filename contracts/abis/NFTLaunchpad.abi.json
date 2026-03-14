@@ -1,14 +1,26 @@
 {
     "functions": [
         {
-            "name": "register",
+            "name": "registerCollection",
             "type": "Function",
             "payable": false,
             "onlyOwner": false,
             "inputs": [
                 {
-                    "name": "nftContract",
-                    "type": "ADDRESS"
+                    "name": "name",
+                    "type": "STRING"
+                },
+                {
+                    "name": "symbol",
+                    "type": "STRING"
+                },
+                {
+                    "name": "imageURI",
+                    "type": "STRING"
+                },
+                {
+                    "name": "maxSupply",
+                    "type": "UINT256"
                 },
                 {
                     "name": "mintPrice",
@@ -17,10 +29,6 @@
                 {
                     "name": "paymentToken",
                     "type": "ADDRESS"
-                },
-                {
-                    "name": "maxSupply",
-                    "type": "UINT256"
                 },
                 {
                     "name": "startBlock",
@@ -41,8 +49,8 @@
             ],
             "outputs": [
                 {
-                    "name": "success",
-                    "type": "BOOL"
+                    "name": "collectionId",
+                    "type": "UINT256"
                 }
             ]
         },
@@ -53,8 +61,8 @@
             "onlyOwner": false,
             "inputs": [
                 {
-                    "name": "nftContract",
-                    "type": "ADDRESS"
+                    "name": "collectionId",
+                    "type": "UINT256"
                 },
                 {
                     "name": "quantity",
@@ -75,13 +83,87 @@
             "onlyOwner": false,
             "inputs": [
                 {
-                    "name": "nftContract",
-                    "type": "ADDRESS"
+                    "name": "collectionId",
+                    "type": "UINT256"
                 }
             ],
             "outputs": [
                 {
                     "name": "amount",
+                    "type": "UINT256"
+                }
+            ]
+        },
+        {
+            "name": "marketplaceTransfer",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "collectionId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "tokenId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "from",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "to",
+                    "type": "ADDRESS"
+                }
+            ],
+            "outputs": [
+                {
+                    "name": "success",
+                    "type": "BOOL"
+                }
+            ]
+        },
+        {
+            "name": "ownerOf",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "collectionId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "tokenId",
+                    "type": "UINT256"
+                }
+            ],
+            "outputs": [
+                {
+                    "name": "owner",
+                    "type": "UINT256"
+                }
+            ]
+        },
+        {
+            "name": "balanceOf",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "collectionId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "owner",
+                    "type": "ADDRESS"
+                }
+            ],
+            "outputs": [
+                {
+                    "name": "balance",
                     "type": "UINT256"
                 }
             ]
@@ -93,8 +175,8 @@
             "onlyOwner": false,
             "inputs": [
                 {
-                    "name": "nftContract",
-                    "type": "ADDRESS"
+                    "name": "collectionId",
+                    "type": "UINT256"
                 }
             ],
             "outputs": [
@@ -103,11 +185,11 @@
                     "type": "UINT256"
                 },
                 {
-                    "name": "paymentToken",
+                    "name": "mintPrice",
                     "type": "UINT256"
                 },
                 {
-                    "name": "mintPrice",
+                    "name": "paymentToken",
                     "type": "UINT256"
                 },
                 {
@@ -131,55 +213,95 @@
                     "type": "UINT256"
                 },
                 {
-                    "name": "proceeds",
-                    "type": "UINT256"
-                },
-                {
                     "name": "maxPerWallet",
                     "type": "UINT256"
-                }
-            ]
-        },
-        {
-            "name": "getMinted",
-            "type": "View",
-            "payable": false,
-            "onlyOwner": false,
-            "inputs": [
-                {
-                    "name": "nftContract",
-                    "type": "ADDRESS"
-                }
-            ],
-            "outputs": [
-                {
-                    "name": "minted",
-                    "type": "UINT256"
-                }
-            ]
-        },
-        {
-            "name": "getWalletMintCount",
-            "type": "View",
-            "payable": false,
-            "onlyOwner": false,
-            "inputs": [
-                {
-                    "name": "nftContract",
-                    "type": "ADDRESS"
                 },
                 {
-                    "name": "wallet",
+                    "name": "proceeds",
+                    "type": "UINT256"
+                }
+            ]
+        },
+        {
+            "name": "getCollectionCount",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "count",
+                    "type": "UINT256"
+                }
+            ]
+        },
+        {
+            "name": "getCollectionStrings",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "collectionId",
+                    "type": "UINT256"
+                }
+            ],
+            "outputs": [
+                {
+                    "name": "name",
+                    "type": "STRING"
+                },
+                {
+                    "name": "symbol",
+                    "type": "STRING"
+                },
+                {
+                    "name": "imageURI",
+                    "type": "STRING"
+                }
+            ]
+        },
+        {
+            "name": "setMarketplace",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "marketplace",
                     "type": "ADDRESS"
                 }
             ],
             "outputs": [
                 {
-                    "name": "minted",
-                    "type": "UINT256"
+                    "name": "success",
+                    "type": "BOOL"
                 }
             ]
         }
     ],
-    "events": []
+    "events": [
+        {
+            "name": "Transferred",
+            "values": [
+                {
+                    "name": "operator",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "from",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "to",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "amount",
+                    "type": "UINT256"
+                }
+            ],
+            "type": "Event"
+        }
+    ]
 }

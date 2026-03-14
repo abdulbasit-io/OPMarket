@@ -6,8 +6,8 @@ const LINKS = [
   { to: '/',            label: 'Home'        },
   { to: '/marketplace', label: 'Marketplace' },
   { to: '/launch',      label: 'Launch'      },
-  { to: '/deploy',      label: 'Deploy'      },
   { to: '/my-nfts',     label: 'My NFTs'     },
+  { to: '/faucet',      label: 'Faucet'      },
 ];
 
 export default function Navbar() {

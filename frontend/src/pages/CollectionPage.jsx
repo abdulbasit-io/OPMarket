@@ -1,10 +1,10 @@
 // ═══════════════════════════════════════════════════════════
 // CollectionPage — Individual collection view
-// Route: /collection/:addr
+// Route: /collection/:id  (collectionId)
 // ═══════════════════════════════════════════════════════════
 //
 // Shows:
-//   - Collection header (name, progress, status)
+//   - Collection header (name, image, progress, status)
 //   - Mint card (approve token → mint)
 //   - Creator withdraw card
 //   - NFTs from this collection listed on the marketplace
@@ -17,20 +17,17 @@ import ListingCard from '../components/ListingCard';
 import BuyModal from '../components/BuyModal';
 import {
   getCollection,
-  getNFTName,
-  getNFTCollectionInfo,
   getTokenSymbol,
   getTokenAllowance,
+  getTokenBalance,
   approveTokenForLaunchpad,
   mintFromLaunchpad,
   withdrawProceeds,
   getAllActiveListings,
-  fetchNFTMetadata,
-  getTokenURI,
 } from '../utils/contractService';
 import { getBlockNumber } from '../utils/opnetProvider';
 import { CONTRACTS, PAYMENT_TOKENS, TOKEN_DECIMALS } from '../utils/constants';
-import { truncateAddress, toHuman, toRaw } from '../utils/formatters';
+import { truncateAddress, toHuman } from '../utils/formatters';
 
 // ── Helpers ───────────────────────────────────────────────
 
@@ -77,15 +74,16 @@ function MintProgress({ minted, maxSupply }) {
 
 const MINT_STEP = { IDLE: 0, APPROVE: 1, MINTING: 2, DONE: 3 };
 
-function MintCard({ collection, nftAddr, currentBlock, walletAddr, onSuccess }) {
+function MintCard({ collection, currentBlock, walletAddr, onSuccess }) {
   const [qty,      setQty]      = useState(1);
   const [mintStep, setMintStep] = useState(MINT_STEP.IDLE);
   const [txId,     setTxId]     = useState('');
   const [error,    setError]    = useState('');
   const [loading,  setLoading]  = useState(false);
-  const [symbol,   setSymbol]   = useState('HODL');
+  const [symbol,   setSymbol]   = useState('tWBTC');
   const [decimals, setDecimals] = useState(TOKEN_DECIMALS);
   const [needsApproval, setNeedsApproval] = useState(false);
+  const [tokenBalance, setTokenBalance]   = useState(null);
 
   useEffect(() => {
     if (!collection?.paymentToken) return;
@@ -101,6 +99,7 @@ function MintCard({ collection, nftAddr, currentBlock, walletAddr, onSuccess }) 
     getTokenAllowance(collection.paymentToken, walletAddr, CONTRACTS.LAUNCHPAD).then(allowance => {
       setNeedsApproval(allowance < totalCost);
     });
+    getTokenBalance(collection.paymentToken, walletAddr).then(bal => setTokenBalance(bal));
   }, [walletAddr, collection, qty]);
 
   const totalCost = collection ? collection.mintPrice * BigInt(qty) : 0n;
@@ -128,7 +127,7 @@ function MintCard({ collection, nftAddr, currentBlock, walletAddr, onSuccess }) 
     setLoading(true);
     setMintStep(MINT_STEP.MINTING);
     try {
-      const id = await mintFromLaunchpad(walletAddr, nftAddr, qty);
+      const id = await mintFromLaunchpad(walletAddr, collection.id, qty);
       setTxId(id);
       setMintStep(MINT_STEP.DONE);
       onSuccess?.();
@@ -172,7 +171,6 @@ function MintCard({ collection, nftAddr, currentBlock, walletAddr, onSuccess }) 
 
       {canMint && collection?.minted < collection?.maxSupply && (
         <>
-          {/* Quantity selector */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
             <label className="form-label" style={{ whiteSpace: 'nowrap' }}>Quantity</label>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1 }}>
@@ -188,7 +186,6 @@ function MintCard({ collection, nftAddr, currentBlock, walletAddr, onSuccess }) 
             </div>
           </div>
 
-          {/* Cost breakdown */}
           <div style={{ background: 'rgba(255,255,255,0.03)', borderRadius: 'var(--r-md)', padding: '12px 16px', marginBottom: 16, fontSize: '0.82rem' }}>
             <div className="price-row" style={{ paddingTop: 0 }}>
               <span className="price-label">Price per NFT</span>
@@ -199,6 +196,29 @@ function MintCard({ collection, nftAddr, currentBlock, walletAddr, onSuccess }) 
               <span className="price-value">{toHuman(totalCost, decimals)} {symbol}</span>
             </div>
           </div>
+
+          {/* Low balance hint for tWBTC */}
+          {collection.paymentToken === CONTRACTS.WBTC_TOKEN &&
+           tokenBalance !== null && tokenBalance < totalCost && (
+            <div style={{
+              marginBottom: 12,
+              padding: '8px 12px',
+              background: 'rgba(59,130,246,0.08)',
+              border: '1px solid rgba(59,130,246,0.2)',
+              borderRadius: 'var(--r-md)',
+              fontSize: '0.78rem',
+              color: 'var(--text-secondary)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 10,
+            }}>
+              <span>Your tWBTC balance is low.</span>
+              <Link to="/faucet" className="btn btn-ghost btn-sm" style={{ flexShrink: 0 }}>
+                Get tWBTC →
+              </Link>
+            </div>
+          )}
 
           {needsApproval ? (
             <button className="btn btn-primary btn-full" onClick={handleApprove} disabled={loading}>
@@ -228,40 +248,32 @@ function MintCard({ collection, nftAddr, currentBlock, walletAddr, onSuccess }) 
 // ── Main Page ─────────────────────────────────────────────
 
 export default function CollectionPage() {
-  const { addr }                          = useParams();
+  const { id }                            = useParams();
   const { address, isConnected, connect } = useWallet();
 
-  const [collection,    setCollection]    = useState(null);
-  const [collName,      setCollName]      = useState('');
-  const [collInfo,      setCollInfo]      = useState(null);
-  const [currentBlock,  setCurrentBlock]  = useState(null);
-  const [listings,      setListings]      = useState([]);
-  const [buyTarget,     setBuyTarget]     = useState(null);
-  const [symbol,        setSymbol]        = useState('HODL');
-  const [decimals,      setDecimals]      = useState(TOKEN_DECIMALS);
-  const [loading,       setLoading]       = useState(true);
-  const [withdrawing,   setWithdrawing]   = useState(false);
-  const [withdrawTx,    setWithdrawTx]    = useState('');
-  const [error,         setError]         = useState('');
+  const [collection,   setCollection]   = useState(null);
+  const [currentBlock, setCurrentBlock] = useState(null);
+  const [listings,     setListings]     = useState([]);
+  const [buyTarget,    setBuyTarget]    = useState(null);
+  const [symbol,       setSymbol]       = useState('tWBTC');
+  const [decimals,     setDecimals]     = useState(TOKEN_DECIMALS);
+  const [loading,      setLoading]      = useState(true);
+  const [withdrawing,  setWithdrawing]  = useState(false);
+  const [withdrawTx,   setWithdrawTx]  = useState('');
+  const [error,        setError]        = useState('');
 
   const load = useCallback(async () => {
-    if (!addr) return;
+    if (id == null) return;
     setLoading(true);
     try {
-      const [coll, name, info, block, allListings] = await Promise.all([
-        getCollection(addr),
-        getNFTName(addr),
-        getNFTCollectionInfo(addr),
+      const [coll, block, allListings] = await Promise.all([
+        getCollection(id),
         getBlockNumber(),
         getAllActiveListings(),
       ]);
       setCollection(coll);
-      setCollName(name || '');
-      setCollInfo(info);
       setCurrentBlock(block ? Number(block) : null);
-      setListings(allListings.filter(l =>
-        l.nftContract?.toLowerCase() === addr.toLowerCase()
-      ));
+      setListings(allListings.filter(l => String(l.collectionId) === String(id)));
       if (coll?.paymentToken) {
         const known = PAYMENT_TOKENS[coll.paymentToken];
         if (known) { setSymbol(known.symbol); setDecimals(known.decimals); }
@@ -273,7 +285,7 @@ export default function CollectionPage() {
     } finally {
       setLoading(false);
     }
-  }, [addr]);
+  }, [id]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -284,7 +296,7 @@ export default function CollectionPage() {
     setError('');
     setWithdrawing(true);
     try {
-      const txId = await withdrawProceeds(address, addr);
+      const txId = await withdrawProceeds(address, id);
       setWithdrawTx(txId);
       await load();
     } catch (e) {
@@ -298,7 +310,7 @@ export default function CollectionPage() {
     ? blockStatus(currentBlock, collection.startBlock, collection.endBlock)
     : null;
 
-  // ── Loading ───────────────────────────────────────────────
+  // ── Loading ─────────────────────────────────────────────
   if (loading) {
     return (
       <main className="page-content">
@@ -315,7 +327,7 @@ export default function CollectionPage() {
     );
   }
 
-  // ── Not registered ────────────────────────────────────────
+  // ── Not found ────────────────────────────────────────────
   if (!collection?.isRegistered) {
     return (
       <main className="page-content">
@@ -324,9 +336,7 @@ export default function CollectionPage() {
             <div className="empty-icon">🔍</div>
             <h3 className="empty-title">Collection not found</h3>
             <p className="empty-desc">
-              <code style={{ background: 'rgba(255,255,255,0.08)', padding: '2px 6px', borderRadius: 4 }}>
-                {truncateAddress(addr)}
-              </code>
+              Collection <code style={{ background: 'rgba(255,255,255,0.08)', padding: '2px 6px', borderRadius: 4 }}>#{id}</code>
               {' '}is not registered with the OPMarket launchpad.
             </p>
             <Link to="/launch" className="btn btn-primary" style={{ marginTop: 8 }}>
@@ -345,30 +355,24 @@ export default function CollectionPage() {
         {/* ── Collection Header ─────────────────────────── */}
         <div style={{ paddingTop: 32, marginBottom: 32 }}>
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: 20, flexWrap: 'wrap' }}>
-            {/* Icon */}
-            {collInfo?.icon ? (
-              <img src={collInfo.icon} alt={collName}
-                style={{ width: 72, height: 72, borderRadius: 'var(--r-lg)', border: '1px solid var(--border)', objectFit: 'cover', flexShrink: 0 }}
-                onError={e => { e.currentTarget.style.display = 'none'; }}
+            {/* Collection image */}
+            <div style={{ width: 72, height: 72, borderRadius: 'var(--r-lg)', border: '1px solid var(--border)', overflow: 'hidden', flexShrink: 0 }}>
+              <NFTImage
+                src={collection.imageURI}
+                alt={collection.name}
+                style={{ width: '100%', height: '100%', objectFit: 'cover' }}
               />
-            ) : (
-              <div style={{
-                width: 72, height: 72, borderRadius: 'var(--r-lg)', border: '1px solid var(--border)',
-                background: 'var(--bg-surface)', display: 'flex', alignItems: 'center', justifyContent: 'center',
-                fontSize: '1.75rem', flexShrink: 0,
-              }}>◆</div>
-            )}
+            </div>
             <div style={{ flex: 1 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 4 }}>
-                <h1 className="page-title" style={{ marginBottom: 0 }}>{collName || 'Unnamed Collection'}</h1>
+                <h1 className="page-title" style={{ marginBottom: 0 }}>
+                  {collection.name || 'Unnamed Collection'}
+                </h1>
                 {status && <StatusBadge status={status} />}
               </div>
-              <div className="address-pill" style={{ marginBottom: 8 }}>{truncateAddress(addr, 10, 8)}</div>
-              {collInfo?.description && (
-                <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem', maxWidth: 600, lineHeight: 1.6 }}>
-                  {collInfo.description}
-                </p>
-              )}
+              <div style={{ color: 'var(--text-secondary)', fontSize: '0.82rem' }}>
+                {collection.symbol} · Collection #{id}
+              </div>
             </div>
           </div>
         </div>
@@ -405,7 +409,6 @@ export default function CollectionPage() {
             ) : (
               <MintCard
                 collection={collection}
-                nftAddr={addr}
                 currentBlock={currentBlock}
                 walletAddr={address}
                 onSuccess={load}
@@ -419,14 +422,14 @@ export default function CollectionPage() {
               <h2 style={{ fontSize: 'var(--text-xl)', fontWeight: 700, marginBottom: 20 }}>Details</h2>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px' }}>
                 {[
-                  { label: 'Mint Price',      value: `${toHuman(collection.mintPrice, decimals)} ${symbol}` },
-                  { label: 'Max Supply',      value: collection.maxSupply.toLocaleString() },
-                  { label: 'Minted',          value: collection.minted.toLocaleString() },
-                  { label: 'Per-Wallet Limit',value: collection.maxPerWallet > 0n ? collection.maxPerWallet.toLocaleString() : 'Unlimited' },
-                  { label: 'Royalty',         value: `${(collection.royaltyBps / 100).toFixed(1)}%` },
-                  { label: 'Start Block',     value: `#${collection.startBlock.toLocaleString()}` },
-                  { label: 'End Block',       value: `#${collection.endBlock.toLocaleString()}` },
-                  { label: 'Payment Token',   value: truncateAddress(collection.paymentToken, 8, 6) },
+                  { label: 'Mint Price',       value: `${toHuman(collection.mintPrice, decimals)} ${symbol}` },
+                  { label: 'Max Supply',        value: collection.maxSupply.toLocaleString() },
+                  { label: 'Minted',            value: collection.minted.toLocaleString() },
+                  { label: 'Per-Wallet Limit',  value: collection.maxPerWallet > 0n ? collection.maxPerWallet.toLocaleString() : 'Unlimited' },
+                  { label: 'Royalty',           value: `${(collection.royaltyBps / 100).toFixed(1)}%` },
+                  { label: 'Start Block',       value: `#${collection.startBlock.toLocaleString()}` },
+                  { label: 'End Block',         value: `#${collection.endBlock.toLocaleString()}` },
+                  { label: 'Payment Token',     value: truncateAddress(collection.paymentToken, 8, 6) },
                 ].map(({ label, value }) => (
                   <div key={label} className="price-row" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 2, padding: '10px 0' }}>
                     <span className="price-label">{label}</span>

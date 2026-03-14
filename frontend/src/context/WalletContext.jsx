@@ -16,22 +16,22 @@ export function useWallet() {
 }
 
 export function WalletProvider({ children }) {
-  const [isConnected,     setIsConnected]     = useState(false);
-  const [address,         setAddress]         = useState('');
-  const [btcBalance,      setBtcBalance]      = useState(0);
-  const [hodlBalance,     setHodlBalance]     = useState(null);  // BigInt | null
-  const [isConnecting,    setIsConnecting]    = useState(false);
-  const [showInstall,     setShowInstall]     = useState(false);
+  const [isConnected,  setIsConnected]  = useState(false);
+  const [address,      setAddress]      = useState('');
+  const [btcBalance,   setBtcBalance]   = useState(0);
+  const [wbtcBalance,  setWbtcBalance]  = useState(null);  // BigInt | null
+  const [isConnecting, setIsConnecting] = useState(false);
+  const [showInstall,  setShowInstall]  = useState(false);
 
   const isOPWalletAvailable = () =>
     typeof window !== 'undefined' && !!window.opnet;
 
-  // ── Fetch HODL token balance ───────────────────────────
-  const fetchHODLBalance = useCallback(async (addr) => {
-    if (!addr || !CONTRACTS.HODL_TOKEN) return;
+  // ── Fetch tWBTC token balance ──────────────────────────
+  const fetchWBTCBalance = useCallback(async (addr) => {
+    if (!addr || !CONTRACTS.WBTC_TOKEN) return;
     try {
-      const bal = await getTokenBalance(CONTRACTS.HODL_TOKEN, addr);
-      if (bal !== null) setHodlBalance(bal);
+      const bal = await getTokenBalance(CONTRACTS.WBTC_TOKEN, addr);
+      if (bal !== null) setWbtcBalance(bal);
     } catch {
       // non-fatal
     }
@@ -46,11 +46,11 @@ export function WalletProvider({ children }) {
       setIsConnected(true);
       setAddress(data.address);
       setBtcBalance(data.btcBalance || 0);
-      fetchHODLBalance(data.address);
+      fetchWBTCBalance(data.address);
     } catch {
       localStorage.removeItem('opmarket_wallet');
     }
-  }, [fetchHODLBalance]);
+  }, [fetchWBTCBalance]);
 
   // ── Connect ────────────────────────────────────────────
   const connect = useCallback(async () => {
@@ -78,7 +78,7 @@ export function WalletProvider({ children }) {
       setAddress(addr);
       setBtcBalance(btcBal);
       setIsConnected(true);
-      fetchHODLBalance(addr);
+      fetchWBTCBalance(addr);
 
       localStorage.setItem('opmarket_wallet', JSON.stringify({
         address: addr,
@@ -90,14 +90,14 @@ export function WalletProvider({ children }) {
     } finally {
       setIsConnecting(false);
     }
-  }, [fetchHODLBalance]);
+  }, [fetchWBTCBalance]);
 
   // ── Disconnect ─────────────────────────────────────────
   const disconnect = useCallback(() => {
     setIsConnected(false);
     setAddress('');
     setBtcBalance(0);
-    setHodlBalance(null);
+    setWbtcBalance(null);
     localStorage.removeItem('opmarket_wallet');
   }, []);
 
@@ -109,16 +109,16 @@ export function WalletProvider({ children }) {
         const wb = await window.opnet.getBalance();
         if (wb?.confirmed !== undefined) setBtcBalance(wb.confirmed / 1e8);
       }
-      await fetchHODLBalance(address);
+      await fetchWBTCBalance(address);
     } catch { /* ignore */ }
-  }, [isConnected, address, fetchHODLBalance]);
+  }, [isConnected, address, fetchWBTCBalance]);
 
   const value = {
     isConnected,
     isConnecting,
     address,
     btcBalance,
-    hodlBalance,
+    wbtcBalance,
     connect,
     disconnect,
     refreshBalance,

@@ -6,7 +6,7 @@ export const NFTMarketplaceAbi = [
     {
         name: 'list',
         inputs: [
-            { name: 'nftContract', type: ABIDataTypes.ADDRESS },
+            { name: 'collectionId', type: ABIDataTypes.UINT256 },
             { name: 'tokenId', type: ABIDataTypes.UINT256 },
             { name: 'price', type: ABIDataTypes.UINT256 },
             { name: 'paymentToken', type: ABIDataTypes.ADDRESS },
@@ -29,28 +29,12 @@ export const NFTMarketplaceAbi = [
         type: BitcoinAbiTypes.Function,
     },
     {
-        name: 'setFee',
-        inputs: [{ name: 'feeBps', type: ABIDataTypes.UINT256 }],
-        outputs: [{ name: 'success', type: ABIDataTypes.BOOL }],
-        type: BitcoinAbiTypes.Function,
-    },
-    {
-        name: 'withdrawFees',
-        inputs: [
-            { name: 'token', type: ABIDataTypes.ADDRESS },
-            { name: 'recipient', type: ABIDataTypes.ADDRESS },
-            { name: 'amount', type: ABIDataTypes.UINT256 },
-        ],
-        outputs: [{ name: 'success', type: ABIDataTypes.BOOL }],
-        type: BitcoinAbiTypes.Function,
-    },
-    {
         name: 'getListing',
         constant: true,
         inputs: [{ name: 'listingId', type: ABIDataTypes.UINT256 }],
         outputs: [
             { name: 'seller', type: ABIDataTypes.UINT256 },
-            { name: 'nftContract', type: ABIDataTypes.UINT256 },
+            { name: 'collectionId', type: ABIDataTypes.UINT256 },
             { name: 'tokenId', type: ABIDataTypes.UINT256 },
             { name: 'price', type: ABIDataTypes.UINT256 },
             { name: 'paymentToken', type: ABIDataTypes.UINT256 },
@@ -68,17 +52,32 @@ export const NFTMarketplaceAbi = [
         type: BitcoinAbiTypes.Function,
     },
     {
+        name: 'setLaunchpad',
+        inputs: [{ name: 'launchpad', type: ABIDataTypes.ADDRESS }],
+        outputs: [{ name: 'success', type: ABIDataTypes.BOOL }],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'setFee',
+        inputs: [{ name: 'feeBps', type: ABIDataTypes.UINT256 }],
+        outputs: [{ name: 'success', type: ABIDataTypes.BOOL }],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'withdrawFees',
+        inputs: [
+            { name: 'token', type: ABIDataTypes.ADDRESS },
+            { name: 'recipient', type: ABIDataTypes.ADDRESS },
+            { name: 'amount', type: ABIDataTypes.UINT256 },
+        ],
+        outputs: [{ name: 'success', type: ABIDataTypes.BOOL }],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
         name: 'getPlatformFee',
         constant: true,
         inputs: [],
         outputs: [{ name: 'feeBps', type: ABIDataTypes.UINT256 }],
-        type: BitcoinAbiTypes.Function,
-    },
-    {
-        name: 'getAccruedFees',
-        constant: true,
-        inputs: [],
-        outputs: [{ name: 'accrued', type: ABIDataTypes.UINT256 }],
         type: BitcoinAbiTypes.Function,
     },
     ...NFTMarketplaceEvents,

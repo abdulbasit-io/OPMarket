@@ -40,32 +40,12 @@ export type Cancel = CallResult<
 >;
 
 /**
- * @description Represents the result of the setFee function call.
- */
-export type SetFee = CallResult<
-    {
-        success: boolean;
-    },
-    OPNetEvent<never>[]
->;
-
-/**
- * @description Represents the result of the withdrawFees function call.
- */
-export type WithdrawFees = CallResult<
-    {
-        success: boolean;
-    },
-    OPNetEvent<never>[]
->;
-
-/**
  * @description Represents the result of the getListing function call.
  */
 export type GetListing = CallResult<
     {
         seller: bigint;
-        nftContract: bigint;
+        collectionId: bigint;
         tokenId: bigint;
         price: bigint;
         paymentToken: bigint;
@@ -87,6 +67,36 @@ export type GetListingCount = CallResult<
 >;
 
 /**
+ * @description Represents the result of the setLaunchpad function call.
+ */
+export type SetLaunchpad = CallResult<
+    {
+        success: boolean;
+    },
+    OPNetEvent<never>[]
+>;
+
+/**
+ * @description Represents the result of the setFee function call.
+ */
+export type SetFee = CallResult<
+    {
+        success: boolean;
+    },
+    OPNetEvent<never>[]
+>;
+
+/**
+ * @description Represents the result of the withdrawFees function call.
+ */
+export type WithdrawFees = CallResult<
+    {
+        success: boolean;
+    },
+    OPNetEvent<never>[]
+>;
+
+/**
  * @description Represents the result of the getPlatformFee function call.
  */
 export type GetPlatformFee = CallResult<
@@ -96,22 +106,12 @@ export type GetPlatformFee = CallResult<
     OPNetEvent<never>[]
 >;
 
-/**
- * @description Represents the result of the getAccruedFees function call.
- */
-export type GetAccruedFees = CallResult<
-    {
-        accrued: bigint;
-    },
-    OPNetEvent<never>[]
->;
-
 // ------------------------------------------------------------------
 // INFTMarketplace
 // ------------------------------------------------------------------
 export interface INFTMarketplace extends IOP_NETContract {
     list(
-        nftContract: Address,
+        collectionId: bigint,
         tokenId: bigint,
         price: bigint,
         paymentToken: Address,
@@ -120,10 +120,10 @@ export interface INFTMarketplace extends IOP_NETContract {
     ): Promise<List>;
     buy(listingId: bigint): Promise<Buy>;
     cancel(listingId: bigint): Promise<Cancel>;
-    setFee(feeBps: bigint): Promise<SetFee>;
-    withdrawFees(token: Address, recipient: Address, amount: bigint): Promise<WithdrawFees>;
     getListing(listingId: bigint): Promise<GetListing>;
     getListingCount(): Promise<GetListingCount>;
+    setLaunchpad(launchpad: Address): Promise<SetLaunchpad>;
+    setFee(feeBps: bigint): Promise<SetFee>;
+    withdrawFees(token: Address, recipient: Address, amount: bigint): Promise<WithdrawFees>;
     getPlatformFee(): Promise<GetPlatformFee>;
-    getAccruedFees(): Promise<GetAccruedFees>;
 }

@@ -8,113 +8,145 @@ import {
     Revert,
     SafeMath,
     Selector,
+    StoredMapU256,
     StoredU256,
     encodeSelector,
 } from '@btc-vision/btc-runtime/runtime';
 import { EMPTY_POINTER } from '@btc-vision/btc-runtime/runtime/math/bytes';
+import { sha256 } from '@btc-vision/btc-runtime/runtime/env/global';
 
 // ═══════════════════════════════════════════════════════════
-// NFTMarketplace — Non-Custodial OP721 NFT Exchange
+// NFTMarketplace — Secondary market for NFTLaunchpad collections
 // ═══════════════════════════════════════════════════════════
 //
-// Approval model — marketplace never holds the NFT.
+// Works with the self-contained NFTLaunchpad that tracks ownership
+// internally. No external NFT contract needed.
 //
 // Seller flow:
-//   1. nftContract.setApprovalForAll(marketplace, true)
-//   2. marketplace.list(nftContract, tokenId, price, paymentToken, royaltyRecipient, royaltyBps)
+//   1. marketplace.list(collectionId, tokenId, price, paymentToken,
+//                       royaltyRecipient, royaltyBps)
 //
 // Buyer flow:
-//   1. paymentToken.approve(marketplace, price)   ← full listing price
+//   1. paymentToken.increaseAllowance(marketplace, price)
 //   2. marketplace.buy(listingId)
-//      → transferFrom seller→buyer (NFT)
-//      → transferFrom buyer→seller (OP20 proceeds)
-//      → transferFrom buyer→royaltyRecipient (royalty, if any)
-//      → transferFrom buyer→marketplace (platform fee)
-//
-// Cross-contract selectors use OPNet's SHA256-based scheme.
-// Confirmed from OPNetTransform build logs (incident INC-mmg6faj1):
-//   transferFrom → 0x4b6685e7
-//   transfer     → 0x3b88ef57
-// isApprovedForAll and approve are computed via encodeSelector at compile time.
+//      → launchpad.marketplaceTransfer(collId, tokenId, seller, buyer)
+//      → token.transferFrom(buyer → seller, sellerProceeds)
+//      → token.transferFrom(buyer → royaltyRecipient, royalty)
+//      → token.transferFrom(buyer → marketplace, platformFee)
 // ═══════════════════════════════════════════════════════════
 
-// ─── Cross-contract selectors (SHA256-based, OPNet) ────────
-// Using encodeSelector from btc-runtime which computes SHA256 of the method name.
-// Do NOT hardcode Ethereum keccak256 selectors here.
-const SEL_TRANSFER_FROM: Selector       = encodeSelector('transferFrom');     // 0x4b6685e7
-const SEL_TRANSFER: Selector            = encodeSelector('transfer');          // 0x3b88ef57
-const SEL_IS_APPROVED_FOR_ALL: Selector = encodeSelector('isApprovedForAll'); // 0x67da1fb2
+// ─── Cross-contract selectors ──────────────────────────────
+const SEL_MARKETPLACE_TRANSFER: Selector = encodeSelector('marketplaceTransfer');
+const SEL_TRANSFER_FROM: Selector        = encodeSelector('transferFrom');
+const SEL_TRANSFER: Selector             = encodeSelector('transfer');
 
 // ─── Global storage pointers ───────────────────────────────
-const deployerPointer: u16      = Blockchain.nextPointer;
-const listingCounterPointer: u16 = Blockchain.nextPointer;
-const platformFeeBpsPointer: u16 = Blockchain.nextPointer;
-const platformFeeAccruedPointer: u16 = Blockchain.nextPointer;
+const deployerPtr:       u16 = Blockchain.nextPointer;
+const launchpadPtr:      u16 = Blockchain.nextPointer;
+const listCountPtr:      u16 = Blockchain.nextPointer;
+const platformFeePtr:    u16 = Blockchain.nextPointer;
+const feeAccruedPtr:     u16 = Blockchain.nextPointer;
 
-// ─── Per-listing storage (8 slots each) ────────────────────
-const LISTING_BASE_POINTER: u16 = 100; // leaves room for global pointers above
-const SLOTS_PER_LISTING: u16    = 8;
+// ─── Per-listing map pointers ──────────────────────────────
+const listSellerMapPtr:          u16 = Blockchain.nextPointer;
+const listCollIdMapPtr:          u16 = Blockchain.nextPointer;
+const listTokenIdMapPtr:         u16 = Blockchain.nextPointer;
+const listPriceMapPtr:           u16 = Blockchain.nextPointer;
+const listPayTokenMapPtr:        u16 = Blockchain.nextPointer;
+const listRoyaltyRecipientMapPtr:u16 = Blockchain.nextPointer;
+const listRoyaltyBpsMapPtr:      u16 = Blockchain.nextPointer;
+const listStatusMapPtr:          u16 = Blockchain.nextPointer;
 
-// Field offsets within a listing's storage block
-const F_SELLER:            u16 = 0; // u256 hash of seller address
-const F_NFT_CONTRACT:      u16 = 1; // u256 hash of NFT contract address
-const F_TOKEN_ID:          u16 = 2; // tokenId (u256)
-const F_PRICE:             u16 = 3; // price in paymentToken units
-const F_PAYMENT_TOKEN:     u16 = 4; // u256 hash of OP20 payment token address
-const F_ROYALTY_RECIPIENT: u16 = 5; // u256 hash of royalty recipient (zero = no royalty)
-const F_ROYALTY_BPS:       u16 = 6; // royalty in basis points (0–1000, max 10%)
-const F_STATUS:            u16 = 7; // 0=active, 1=sold, 2=cancelled
-
-// Listing status constants
+// ─── Listing status constants ──────────────────────────────
 const STATUS_ACTIVE:    u256 = u256.fromU64(0);
 const STATUS_SOLD:      u256 = u256.fromU64(1);
 const STATUS_CANCELLED: u256 = u256.fromU64(2);
 
-// Platform constants
-const BASIS_POINTS: u256      = u256.fromU64(10000);
-const MAX_FEE_BPS: u256       = u256.fromU64(1000);  // 10% max platform fee
-const MAX_ROYALTY_BPS: u256   = u256.fromU64(1000);  // 10% max royalty
-const DEFAULT_FEE_BPS: u256   = u256.fromU64(250);   // 2.5% default
+// ─── Platform constants ────────────────────────────────────
+const BASIS_POINTS:   u256 = u256.fromU64(10000);
+const MAX_FEE_BPS:    u256 = u256.fromU64(1000); // 10% max
+const DEFAULT_FEE:    u256 = u256.fromU64(250);  // 2.5%
+
+// ─── Composite key for listing maps ───────────────────────
+// Encodes (listingId, fieldId) as a unique u256 storage key.
+function listingKey(listingId: u256, fieldId: u256): u256 {
+    const buf = new Uint8Array(64);
+    const a = listingId.toUint8Array(true);
+    const b = fieldId.toUint8Array(true);
+    for (let i = 0; i < 32; i++) buf[i] = a[i];
+    for (let i = 0; i < 32; i++) buf[32 + i] = b[i];
+    return u256.fromUint8ArrayBE(sha256(buf));
+}
+
+// Field IDs (used as the second argument to listingKey)
+const FIELD_SELLER:           u256 = u256.fromU64(0);
+const FIELD_COLL_ID:          u256 = u256.fromU64(1);
+const FIELD_TOKEN_ID:         u256 = u256.fromU64(2);
+const FIELD_PRICE:            u256 = u256.fromU64(3);
+const FIELD_PAY_TOKEN:        u256 = u256.fromU64(4);
+const FIELD_ROYALTY_RECIPIENT:u256 = u256.fromU64(5);
+const FIELD_ROYALTY_BPS:      u256 = u256.fromU64(6);
+const FIELD_STATUS:           u256 = u256.fromU64(7);
 
 @final
 export class NFTMarketplace extends OP_NET {
-    private readonly _deployer:          StoredU256;
-    private readonly _listingCounter:    StoredU256;
-    private readonly _platformFeeBps:    StoredU256;
-    private readonly _platformFeeAccrued: StoredU256;
+    private readonly _deployer:     StoredU256;
+    private readonly _launchpad:    StoredU256;
+    private readonly _listCount:    StoredU256;
+    private readonly _platformFee:  StoredU256;
+    private readonly _feeAccrued:   StoredU256;
+
+    // Per-listing storage maps (each field in its own map, keyed by listingId)
+    private readonly _sellers:          StoredMapU256;
+    private readonly _collIds:          StoredMapU256;
+    private readonly _tokenIds:         StoredMapU256;
+    private readonly _prices:           StoredMapU256;
+    private readonly _payTokens:        StoredMapU256;
+    private readonly _royaltyRecipients:StoredMapU256;
+    private readonly _royaltyBps:       StoredMapU256;
+    private readonly _statuses:         StoredMapU256;
 
     public constructor() {
         super();
-        this._deployer           = new StoredU256(deployerPointer, EMPTY_POINTER);
-        this._listingCounter     = new StoredU256(listingCounterPointer, EMPTY_POINTER);
-        this._platformFeeBps     = new StoredU256(platformFeeBpsPointer, EMPTY_POINTER);
-        this._platformFeeAccrued = new StoredU256(platformFeeAccruedPointer, EMPTY_POINTER);
+        this._deployer    = new StoredU256(deployerPtr,    EMPTY_POINTER);
+        this._launchpad   = new StoredU256(launchpadPtr,   EMPTY_POINTER);
+        this._listCount   = new StoredU256(listCountPtr,   EMPTY_POINTER);
+        this._platformFee = new StoredU256(platformFeePtr, EMPTY_POINTER);
+        this._feeAccrued  = new StoredU256(feeAccruedPtr,  EMPTY_POINTER);
+
+        this._sellers           = new StoredMapU256(listSellerMapPtr);
+        this._collIds           = new StoredMapU256(listCollIdMapPtr);
+        this._tokenIds          = new StoredMapU256(listTokenIdMapPtr);
+        this._prices            = new StoredMapU256(listPriceMapPtr);
+        this._payTokens         = new StoredMapU256(listPayTokenMapPtr);
+        this._royaltyRecipients = new StoredMapU256(listRoyaltyRecipientMapPtr);
+        this._royaltyBps        = new StoredMapU256(listRoyaltyBpsMapPtr);
+        this._statuses          = new StoredMapU256(listStatusMapPtr);
     }
 
     // ─── Deployment ────────────────────────────────────────
+    // No calldata required. Link the launchpad after deployment via setLaunchpad().
     public override onDeployment(_calldata: Calldata): void {
         this._deployer.set(u256.fromUint8ArrayBE(Blockchain.tx.origin));
-        this._platformFeeBps.set(DEFAULT_FEE_BPS);
+        this._platformFee.set(DEFAULT_FEE);
     }
 
     public override onUpdate(_calldata: Calldata): void {
         super.onUpdate(_calldata);
     }
 
-    // ─── Auth ──────────────────────────────────────────────
+    // ─── Auth ───────────────────────────────────────────────
     private requireDeployer(caller: Address): void {
-        if (!u256.eq(u256.fromUint8ArrayBE(caller), this._deployer.value)) {
+        if (!u256.eq(this.addrToU256(caller), this._deployer.value)) {
             throw new Revert('Only deployer');
         }
     }
 
-    // ─── Address ↔ u256 helpers ────────────────────────────
-    // Store address as u256 (same pattern as utilisBTC)
+    // ─── Address helpers ────────────────────────────────────
     private addrToU256(addr: Address): u256 {
         return u256.fromUint8ArrayBE(addr);
     }
 
-    // Recover Address from stored u256 (reverse of fromUint8ArrayBE)
     private u256ToAddr(v: u256): Address {
         const buf = new Uint8Array(32);
         buf[0]  = u8(v.hi2 >> 56); buf[1]  = u8(v.hi2 >> 48); buf[2]  = u8(v.hi2 >> 40); buf[3]  = u8(v.hi2 >> 32);
@@ -128,49 +160,28 @@ export class NFTMarketplace extends OP_NET {
         return changetype<Address>(buf);
     }
 
-    // ─── Listing storage helpers ───────────────────────────
-    private listingPointer(listingId: u64, field: u16): u16 {
-        return LISTING_BASE_POINTER + <u16>(listingId * <u64>SLOTS_PER_LISTING) + field;
-    }
+    // ─── Cross-contract helpers ─────────────────────────────
 
-    private storeField(listingId: u64, field: u16, value: u256): void {
-        const s = new StoredU256(this.listingPointer(listingId, field), EMPTY_POINTER);
-        s.set(value);
-    }
-
-    private readField(listingId: u64, field: u16): u256 {
-        const s = new StoredU256(this.listingPointer(listingId, field), EMPTY_POINTER);
-        return s.value;
-    }
-
-    // ─── Cross-contract call helpers ───────────────────────
-
-    // OP721: transferFrom(from, to, tokenId)
-    // Requires seller has called setApprovalForAll(marketplace, true)
-    private callNFTTransferFrom(
-        nftContract: Address,
-        from: Address,
-        to: Address,
+    // Call launchpad.marketplaceTransfer(collectionId, tokenId, from, to)
+    private callMarketplaceTransfer(
+        collId:  u256,
         tokenId: u256,
+        from:    Address,
+        to:      Address,
     ): void {
-        // 4 (selector) + 32 (from) + 32 (to) + 32 (tokenId) = 100 bytes
-        const cd = new BytesWriter(100);
-        cd.writeSelector(SEL_TRANSFER_FROM);
+        const launchpad: Address = this.u256ToAddr(this._launchpad.value);
+        // 4 (selector) + 32 + 32 + 32 + 32 = 132 bytes
+        const cd = new BytesWriter(132);
+        cd.writeSelector(SEL_MARKETPLACE_TRANSFER);
+        cd.writeU256(collId);
+        cd.writeU256(tokenId);
         cd.writeAddress(from);
         cd.writeAddress(to);
-        cd.writeU256(tokenId);
-        Blockchain.call(nftContract, cd, true);
+        Blockchain.call(launchpad, cd, true);
     }
 
-    // OP20: transferFrom(from, to, amount)
-    // Requires buyer has called approve(marketplace, amount)
-    private callTokenTransferFrom(
-        token: Address,
-        from: Address,
-        to: Address,
-        amount: u256,
-    ): void {
-        // 4 + 32 + 32 + 32 = 100 bytes
+    // Call OP20.transferFrom(from, to, amount)
+    private callTransferFrom(token: Address, from: Address, to: Address, amount: u256): void {
         const cd = new BytesWriter(100);
         cd.writeSelector(SEL_TRANSFER_FROM);
         cd.writeAddress(from);
@@ -179,30 +190,29 @@ export class NFTMarketplace extends OP_NET {
         Blockchain.call(token, cd, true);
     }
 
-    // OP721: isApprovedForAll(owner, operator) → bool
-    private callIsApprovedForAll(
-        nftContract: Address,
-        owner: Address,
-        operator: Address,
-    ): bool {
-        // 4 + 32 + 32 = 68 bytes
+    // Call OP20.transfer(to, amount) — used for fee withdrawal
+    private callTransfer(token: Address, to: Address, amount: u256): void {
         const cd = new BytesWriter(68);
-        cd.writeSelector(SEL_IS_APPROVED_FOR_ALL);
-        cd.writeAddress(owner);
-        cd.writeAddress(operator);
-        const result = Blockchain.call(nftContract, cd, true);
-        if (result.data.byteLength < 1) return false;
-        return result.data.readBoolean();
+        cd.writeSelector(SEL_TRANSFER);
+        cd.writeAddress(to);
+        cd.writeU256(amount);
+        Blockchain.call(token, cd, true);
     }
 
-    // ─── list ──────────────────────────────────────────────
-    // Seller lists an NFT for sale. Seller must have already called
-    // nftContract.setApprovalForAll(marketplace, true).
-    //
-    // royaltyRecipient: zero address if no royalty
-    // royaltyBps: 0–1000 (max 10%)
+    // ─── Listing storage helpers ────────────────────────────
+    private storeL(listId: u256, field: u256, map: StoredMapU256, value: u256): void {
+        map.set(listingKey(listId, field), value);
+    }
+
+    private readL(listId: u256, field: u256, map: StoredMapU256): u256 {
+        return map.get(listingKey(listId, field));
+    }
+
+    // ─── list ───────────────────────────────────────────────
+    // Creator/owner lists a launchpad NFT for secondary sale.
+    // royaltyRecipient: pass zero address for no royalty.
     @method(
-        { name: 'nftContract',      type: ABIDataTypes.ADDRESS },
+        { name: 'collectionId',     type: ABIDataTypes.UINT256 },
         { name: 'tokenId',          type: ABIDataTypes.UINT256 },
         { name: 'price',            type: ABIDataTypes.UINT256 },
         { name: 'paymentToken',     type: ABIDataTypes.ADDRESS },
@@ -211,7 +221,7 @@ export class NFTMarketplace extends OP_NET {
     )
     @returns({ name: 'listingId', type: ABIDataTypes.UINT256 })
     public list(calldata: Calldata): BytesWriter {
-        const nftContract:      Address = calldata.readAddress();
+        const collId:           u256    = calldata.readU256();
         const tokenId:          u256    = calldata.readU256();
         const price:            u256    = calldata.readU256();
         const paymentToken:     Address = calldata.readAddress();
@@ -219,165 +229,172 @@ export class NFTMarketplace extends OP_NET {
         const royaltyBps:       u256    = calldata.readU256();
 
         if (price.isZero()) throw new Revert('Price must be > 0');
-        if (u256.gt(royaltyBps, MAX_ROYALTY_BPS)) throw new Revert('Royalty exceeds 10%');
+        if (u256.gt(royaltyBps, u256.fromU64(1000))) throw new Revert('Royalty exceeds 10%');
 
         const seller: Address = Blockchain.tx.sender;
+        const listId: u256    = this._listCount.value;
 
-        // Verify marketplace is approved to move seller's NFTs
-        const approved: bool = this.callIsApprovedForAll(
-            nftContract,
-            seller,
-            Blockchain.contractAddress,
-        );
-        if (!approved) throw new Revert('Marketplace not approved: call setApprovalForAll first');
+        this.storeL(listId, FIELD_SELLER,            this._sellers,           this.addrToU256(seller));
+        this.storeL(listId, FIELD_COLL_ID,           this._collIds,           collId);
+        this.storeL(listId, FIELD_TOKEN_ID,           this._tokenIds,          tokenId);
+        this.storeL(listId, FIELD_PRICE,              this._prices,            price);
+        this.storeL(listId, FIELD_PAY_TOKEN,          this._payTokens,         this.addrToU256(paymentToken));
+        this.storeL(listId, FIELD_ROYALTY_RECIPIENT,  this._royaltyRecipients, this.addrToU256(royaltyRecipient));
+        this.storeL(listId, FIELD_ROYALTY_BPS,        this._royaltyBps,        royaltyBps);
+        this.storeL(listId, FIELD_STATUS,             this._statuses,          STATUS_ACTIVE);
 
-        // Assign listing ID
-        const listingId: u64 = this._listingCounter.value.toU64();
-        this._listingCounter.set(SafeMath.add(this._listingCounter.value, u256.One));
-
-        // Store listing
-        this.storeField(listingId, F_SELLER,            this.addrToU256(seller));
-        this.storeField(listingId, F_NFT_CONTRACT,      this.addrToU256(nftContract));
-        this.storeField(listingId, F_TOKEN_ID,          tokenId);
-        this.storeField(listingId, F_PRICE,             price);
-        this.storeField(listingId, F_PAYMENT_TOKEN,     this.addrToU256(paymentToken));
-        this.storeField(listingId, F_ROYALTY_RECIPIENT, this.addrToU256(royaltyRecipient));
-        this.storeField(listingId, F_ROYALTY_BPS,       royaltyBps);
-        this.storeField(listingId, F_STATUS,            STATUS_ACTIVE);
+        this._listCount.set(SafeMath.add(listId, u256.One));
 
         const writer = new BytesWriter(32);
-        writer.writeU256(u256.fromU64(listingId));
+        writer.writeU256(listId);
         return writer;
     }
 
-    // ─── buy ───────────────────────────────────────────────
-    // Atomic NFT + OP20 swap.
-    // Buyer must have approved marketplace for the full listing price before calling.
-    //
-    // Payment breakdown:
-    //   platformFee    = price * platformFeeBps / 10000
-    //   royaltyFee     = price * royaltyBps / 10000
-    //   sellerProceeds = price - platformFee - royaltyFee
-    //
-    // All transferFrom calls use buyer as `from` so buyer needs one single
-    // approve(marketplace, price) — marketplace pulls the exact amounts.
+    // ─── buy ────────────────────────────────────────────────
+    // Buyer pays OP20. Ownership transferred via launchpad.marketplaceTransfer.
+    // Buyer must have called paymentToken.increaseAllowance(marketplace, price) first.
     @method({ name: 'listingId', type: ABIDataTypes.UINT256 })
     @returns({ name: 'success', type: ABIDataTypes.BOOL })
     public buy(calldata: Calldata): BytesWriter {
-        const listingIdU256: u256 = calldata.readU256();
-        const listingId: u64 = listingIdU256.toU64();
+        const listId: u256 = calldata.readU256();
 
-        // Validate listing is active
-        const status: u256 = this.readField(listingId, F_STATUS);
+        const status: u256 = this.readL(listId, FIELD_STATUS, this._statuses);
         if (!u256.eq(status, STATUS_ACTIVE)) throw new Revert('Listing not active');
 
         const buyer: Address = Blockchain.tx.sender;
 
-        // Read listing data
-        const sellerHash:            u256 = this.readField(listingId, F_SELLER);
-        const nftContractHash:       u256 = this.readField(listingId, F_NFT_CONTRACT);
-        const tokenId:               u256 = this.readField(listingId, F_TOKEN_ID);
-        const price:                 u256 = this.readField(listingId, F_PRICE);
-        const paymentTokenHash:      u256 = this.readField(listingId, F_PAYMENT_TOKEN);
-        const royaltyRecipientHash:  u256 = this.readField(listingId, F_ROYALTY_RECIPIENT);
-        const royaltyBps:            u256 = this.readField(listingId, F_ROYALTY_BPS);
+        const sellerHash:           u256 = this.readL(listId, FIELD_SELLER,            this._sellers);
+        const collId:               u256 = this.readL(listId, FIELD_COLL_ID,           this._collIds);
+        const tokenId:              u256 = this.readL(listId, FIELD_TOKEN_ID,           this._tokenIds);
+        const price:                u256 = this.readL(listId, FIELD_PRICE,              this._prices);
+        const payTokenHash:         u256 = this.readL(listId, FIELD_PAY_TOKEN,          this._payTokens);
+        const royaltyRecipientHash: u256 = this.readL(listId, FIELD_ROYALTY_RECIPIENT,  this._royaltyRecipients);
+        const royaltyBps:           u256 = this.readL(listId, FIELD_ROYALTY_BPS,        this._royaltyBps);
 
-        // Prevent self-buy
-        if (u256.eq(this.addrToU256(buyer), sellerHash)) {
-            throw new Revert('Cannot buy own listing');
-        }
+        if (u256.eq(this.addrToU256(buyer), sellerHash)) throw new Revert('Cannot buy own listing');
 
-        // Reconstruct addresses
         const seller:           Address = this.u256ToAddr(sellerHash);
-        const nftContract:      Address = this.u256ToAddr(nftContractHash);
-        const paymentToken:     Address = this.u256ToAddr(paymentTokenHash);
+        const paymentToken:     Address = this.u256ToAddr(payTokenHash);
         const royaltyRecipient: Address = this.u256ToAddr(royaltyRecipientHash);
 
-        // Calculate fee split
-        const platformFee: u256 = SafeMath.div(
-            SafeMath.mul(price, this._platformFeeBps.value),
-            BASIS_POINTS,
-        );
-        const royaltyFee: u256 = royaltyBps.isZero()
+        // Fee breakdown
+        const platformFee: u256 = SafeMath.div(SafeMath.mul(price, this._platformFee.value), BASIS_POINTS);
+        const royaltyFee:  u256 = royaltyBps.isZero()
             ? u256.Zero
             : SafeMath.div(SafeMath.mul(price, royaltyBps), BASIS_POINTS);
+        const sellerProceeds: u256 = SafeMath.sub(SafeMath.sub(price, platformFee), royaltyFee);
 
-        const sellerProceeds: u256 = SafeMath.sub(
-            SafeMath.sub(price, platformFee),
-            royaltyFee,
-        );
+        // Step 1: Transfer NFT ownership via launchpad
+        this.callMarketplaceTransfer(collId, tokenId, seller, buyer);
 
-        // ── Atomic swap ──────────────────────────────────────
-        // Step 1: Transfer NFT from seller to buyer
-        this.callNFTTransferFrom(nftContract, seller, buyer, tokenId);
-
-        // Step 2: Transfer seller proceeds (buyer → seller)
+        // Step 2: Pay seller
         if (!sellerProceeds.isZero()) {
-            this.callTokenTransferFrom(paymentToken, buyer, seller, sellerProceeds);
+            this.callTransferFrom(paymentToken, buyer, seller, sellerProceeds);
         }
 
-        // Step 3: Transfer royalty (buyer → royaltyRecipient), if applicable
+        // Step 3: Pay royalty recipient
         if (!royaltyFee.isZero() && !royaltyRecipientHash.isZero()) {
-            this.callTokenTransferFrom(paymentToken, buyer, royaltyRecipient, royaltyFee);
+            this.callTransferFrom(paymentToken, buyer, royaltyRecipient, royaltyFee);
         }
 
-        // Step 4: Collect platform fee (buyer → marketplace)
+        // Step 4: Collect platform fee into marketplace
         if (!platformFee.isZero()) {
-            this.callTokenTransferFrom(paymentToken, buyer, Blockchain.contractAddress, platformFee);
-            this._platformFeeAccrued.set(
-                SafeMath.add(this._platformFeeAccrued.value, platformFee),
-            );
+            this.callTransferFrom(paymentToken, buyer, Blockchain.contractAddress, platformFee);
+            this._feeAccrued.set(SafeMath.add(this._feeAccrued.value, platformFee));
         }
 
-        // Mark listing as sold
-        this.storeField(listingId, F_STATUS, STATUS_SOLD);
+        // Mark sold
+        this.storeL(listId, FIELD_STATUS, this._statuses, STATUS_SOLD);
 
         const writer = new BytesWriter(1);
         writer.writeBoolean(true);
         return writer;
     }
 
-    // ─── cancel ────────────────────────────────────────────
-    // Seller removes their active listing (NFT stays in their wallet — non-custodial)
+    // ─── cancel ─────────────────────────────────────────────
     @method({ name: 'listingId', type: ABIDataTypes.UINT256 })
     @returns({ name: 'success', type: ABIDataTypes.BOOL })
     public cancel(calldata: Calldata): BytesWriter {
-        const listingId: u64 = calldata.readU256().toU64();
+        const listId: u256 = calldata.readU256();
 
-        const status: u256 = this.readField(listingId, F_STATUS);
+        const status: u256 = this.readL(listId, FIELD_STATUS, this._statuses);
         if (!u256.eq(status, STATUS_ACTIVE)) throw new Revert('Listing not active');
 
-        const sellerHash: u256 = this.readField(listingId, F_SELLER);
+        const sellerHash: u256 = this.readL(listId, FIELD_SELLER, this._sellers);
         if (!u256.eq(this.addrToU256(Blockchain.tx.sender), sellerHash)) {
             throw new Revert('Only seller can cancel');
         }
 
-        this.storeField(listingId, F_STATUS, STATUS_CANCELLED);
+        this.storeL(listId, FIELD_STATUS, this._statuses, STATUS_CANCELLED);
 
         const writer = new BytesWriter(1);
         writer.writeBoolean(true);
         return writer;
     }
 
-    // ─── setFee (deployer only) ────────────────────────────
+    // ─── getListing ─────────────────────────────────────────
+    @method({ name: 'listingId', type: ABIDataTypes.UINT256 })
+    @returns(
+        { name: 'seller',           type: ABIDataTypes.UINT256 },
+        { name: 'collectionId',     type: ABIDataTypes.UINT256 },
+        { name: 'tokenId',          type: ABIDataTypes.UINT256 },
+        { name: 'price',            type: ABIDataTypes.UINT256 },
+        { name: 'paymentToken',     type: ABIDataTypes.UINT256 },
+        { name: 'royaltyRecipient', type: ABIDataTypes.UINT256 },
+        { name: 'royaltyBps',       type: ABIDataTypes.UINT256 },
+        { name: 'status',           type: ABIDataTypes.UINT256 },
+    )
+    @view
+    public getListing(calldata: Calldata): BytesWriter {
+        const listId: u256 = calldata.readU256();
+
+        const writer = new BytesWriter(256);
+        writer.writeU256(this.readL(listId, FIELD_SELLER,            this._sellers));
+        writer.writeU256(this.readL(listId, FIELD_COLL_ID,           this._collIds));
+        writer.writeU256(this.readL(listId, FIELD_TOKEN_ID,           this._tokenIds));
+        writer.writeU256(this.readL(listId, FIELD_PRICE,              this._prices));
+        writer.writeU256(this.readL(listId, FIELD_PAY_TOKEN,          this._payTokens));
+        writer.writeU256(this.readL(listId, FIELD_ROYALTY_RECIPIENT,  this._royaltyRecipients));
+        writer.writeU256(this.readL(listId, FIELD_ROYALTY_BPS,        this._royaltyBps));
+        writer.writeU256(this.readL(listId, FIELD_STATUS,             this._statuses));
+        return writer;
+    }
+
+    // ─── getListingCount ────────────────────────────────────
+    @method()
+    @returns({ name: 'count', type: ABIDataTypes.UINT256 })
+    @view
+    public getListingCount(_: Calldata): BytesWriter {
+        const writer = new BytesWriter(32);
+        writer.writeU256(this._listCount.value);
+        return writer;
+    }
+
+    // ─── setLaunchpad (deployer only) ───────────────────────
+    @method({ name: 'launchpad', type: ABIDataTypes.ADDRESS })
+    @returns({ name: 'success', type: ABIDataTypes.BOOL })
+    public setLaunchpad(calldata: Calldata): BytesWriter {
+        this.requireDeployer(Blockchain.tx.sender);
+        this._launchpad.set(this.addrToU256(calldata.readAddress()));
+        const writer = new BytesWriter(1);
+        writer.writeBoolean(true);
+        return writer;
+    }
+
+    // ─── setFee (deployer only) ──────────────────────────────
     @method({ name: 'feeBps', type: ABIDataTypes.UINT256 })
     @returns({ name: 'success', type: ABIDataTypes.BOOL })
     public setFee(calldata: Calldata): BytesWriter {
         this.requireDeployer(Blockchain.tx.sender);
         const feeBps: u256 = calldata.readU256();
         if (u256.gt(feeBps, MAX_FEE_BPS)) throw new Revert('Fee exceeds 10%');
-        this._platformFeeBps.set(feeBps);
-
+        this._platformFee.set(feeBps);
         const writer = new BytesWriter(1);
         writer.writeBoolean(true);
         return writer;
     }
 
-    // ─── withdrawFees (deployer only) ─────────────────────
-    // Withdraw accumulated platform fees to a recipient address.
-    // The marketplace holds OP20 tokens from platform fees. We call transfer
-    // on the payment token — but fees can be in multiple tokens.
-    // For MVP: deployer specifies which token to withdraw.
+    // ─── withdrawFees (deployer only) ───────────────────────
     @method(
         { name: 'token',     type: ABIDataTypes.ADDRESS },
         { name: 'recipient', type: ABIDataTypes.ADDRESS },
@@ -389,77 +406,20 @@ export class NFTMarketplace extends OP_NET {
         const token:     Address = calldata.readAddress();
         const recipient: Address = calldata.readAddress();
         const amount:    u256    = calldata.readU256();
-
         if (amount.isZero()) throw new Revert('Amount must be > 0');
-
-        // Call OP20.transfer(recipient, amount) from marketplace context
-        // (marketplace is the sender in the OP20 call — it owns these tokens)
-        const cd = new BytesWriter(68);
-        cd.writeSelector(SEL_TRANSFER);
-        cd.writeAddress(recipient);
-        cd.writeU256(amount);
-        Blockchain.call(token, cd, true);
-
+        this.callTransfer(token, recipient, amount);
         const writer = new BytesWriter(1);
         writer.writeBoolean(true);
         return writer;
     }
 
-    // ─── getListing ────────────────────────────────────────
-    @method({ name: 'listingId', type: ABIDataTypes.UINT256 })
-    @returns(
-        { name: 'seller',            type: ABIDataTypes.UINT256 },
-        { name: 'nftContract',       type: ABIDataTypes.UINT256 },
-        { name: 'tokenId',           type: ABIDataTypes.UINT256 },
-        { name: 'price',             type: ABIDataTypes.UINT256 },
-        { name: 'paymentToken',      type: ABIDataTypes.UINT256 },
-        { name: 'royaltyRecipient',  type: ABIDataTypes.UINT256 },
-        { name: 'royaltyBps',        type: ABIDataTypes.UINT256 },
-        { name: 'status',            type: ABIDataTypes.UINT256 },
-    )
-    @view
-    public getListing(calldata: Calldata): BytesWriter {
-        const listingId: u64 = calldata.readU256().toU64();
-
-        const writer = new BytesWriter(256); // 8 × 32 bytes
-        writer.writeU256(this.readField(listingId, F_SELLER));
-        writer.writeU256(this.readField(listingId, F_NFT_CONTRACT));
-        writer.writeU256(this.readField(listingId, F_TOKEN_ID));
-        writer.writeU256(this.readField(listingId, F_PRICE));
-        writer.writeU256(this.readField(listingId, F_PAYMENT_TOKEN));
-        writer.writeU256(this.readField(listingId, F_ROYALTY_RECIPIENT));
-        writer.writeU256(this.readField(listingId, F_ROYALTY_BPS));
-        writer.writeU256(this.readField(listingId, F_STATUS));
-        return writer;
-    }
-
-    // ─── getListingCount ───────────────────────────────────
-    @method()
-    @returns({ name: 'count', type: ABIDataTypes.UINT256 })
-    @view
-    public getListingCount(_: Calldata): BytesWriter {
-        const writer = new BytesWriter(32);
-        writer.writeU256(this._listingCounter.value);
-        return writer;
-    }
-
-    // ─── getPlatformFee ────────────────────────────────────
+    // ─── getPlatformFee ─────────────────────────────────────
     @method()
     @returns({ name: 'feeBps', type: ABIDataTypes.UINT256 })
     @view
     public getPlatformFee(_: Calldata): BytesWriter {
         const writer = new BytesWriter(32);
-        writer.writeU256(this._platformFeeBps.value);
-        return writer;
-    }
-
-    // ─── getAccruedFees ────────────────────────────────────
-    @method()
-    @returns({ name: 'accrued', type: ABIDataTypes.UINT256 })
-    @view
-    public getAccruedFees(_: Calldata): BytesWriter {
-        const writer = new BytesWriter(32);
-        writer.writeU256(this._platformFeeAccrued.value);
+        writer.writeU256(this._platformFee.value);
         return writer;
     }
 }

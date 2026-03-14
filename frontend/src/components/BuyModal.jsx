@@ -8,11 +8,10 @@ import {
   approveTokenForMarketplace,
   buyNFT,
   getTokenSymbol,
-  fetchNFTMetadata,
-  getTokenURI,
+  getCollection,
 } from '../utils/contractService';
 import { CONTRACTS, PAYMENT_TOKENS, TOKEN_DECIMALS } from '../utils/constants';
-import { toHuman, truncateAddress } from '../utils/formatters';
+import { toHuman } from '../utils/formatters';
 import NFTImage from './NFTImage';
 
 const STEP = { IDLE: 0, APPROVE: 1, BUY: 2, DONE: 3 };
@@ -20,16 +19,15 @@ const STEP = { IDLE: 0, APPROVE: 1, BUY: 2, DONE: 3 };
 export default function BuyModal({ listing, onClose, onSuccess }) {
   const { address, refreshBalance } = useWallet();
 
-  const [meta,     setMeta]     = useState(null);
-  const [symbol,   setSymbol]   = useState('HODL');
-  const [decimals, setDecimals] = useState(TOKEN_DECIMALS);
-  const [step,     setStep]     = useState(STEP.IDLE);
-  const [txId,     setTxId]     = useState('');
-  const [error,    setError]    = useState('');
-  const [loading,  setLoading]  = useState(false);
+  const [coll,    setColl]    = useState(null);
+  const [symbol,  setSymbol]  = useState('tWBTC');
+  const [decimals,setDecimals]= useState(TOKEN_DECIMALS);
+  const [step,    setStep]    = useState(STEP.IDLE);
+  const [txId,    setTxId]    = useState('');
+  const [error,   setError]   = useState('');
+  const [loading, setLoading] = useState(false);
   const [needsApproval, setNeedsApproval] = useState(false);
 
-  // Resolve metadata + allowance on mount
   useEffect(() => {
     if (!listing) return;
     (async () => {
@@ -39,12 +37,11 @@ export default function BuyModal({ listing, onClose, onSuccess }) {
       setSymbol(sym);
       setDecimals(dec);
 
-      const uri = await getTokenURI(listing.nftContract, listing.tokenId);
-      if (uri) {
-        const m = await fetchNFTMetadata(uri);
-        setMeta(m);
-      }
+      // Load collection metadata for image/name display
+      const collData = await getCollection(listing.collectionId);
+      setColl(collData);
 
+      // Check existing allowance
       if (address && listing.paymentToken) {
         const allowance = await getTokenAllowance(
           listing.paymentToken, address, CONTRACTS.MARKETPLACE,
@@ -56,15 +53,14 @@ export default function BuyModal({ listing, onClose, onSuccess }) {
 
   if (!listing) return null;
 
+  const name  = coll ? `${coll.name} #${listing.tokenId}` : `#${listing.tokenId}`;
+  const image = coll?.imageURI || null;
+
   const handleApprove = async () => {
     setError('');
     setLoading(true);
     try {
-      await approveTokenForMarketplace(
-        listing.paymentToken,
-        listing.price,
-        address,
-      );
+      await approveTokenForMarketplace(listing.paymentToken, listing.price, address);
       setNeedsApproval(false);
       setStep(STEP.BUY);
     } catch (e) {
@@ -105,22 +101,14 @@ export default function BuyModal({ listing, onClose, onSuccess }) {
         <div className="modal-body">
           {step !== STEP.DONE && (
             <>
-              {/* NFT preview */}
               <div style={{ display: 'flex', gap: 16, marginBottom: 20 }}>
                 <div style={{ width: 80, height: 80, borderRadius: 'var(--radius)', overflow: 'hidden', flexShrink: 0 }}>
-                  <NFTImage
-                    src={meta?.image}
-                    contractAddr={listing.nftContract}
-                    tokenId={listing.tokenId}
-                    style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                  />
+                  <NFTImage src={image} alt={name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                 </div>
                 <div>
-                  <div style={{ fontWeight: 600, marginBottom: 4 }}>
-                    {meta?.name || `NFT #${listing.tokenId}`}
-                  </div>
+                  <div style={{ fontWeight: 600, marginBottom: 4 }}>{name}</div>
                   <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>
-                    {truncateAddress(listing.nftContract)}
+                    Collection #{String(listing.collectionId)}
                   </div>
                   <div className="price-row" style={{ marginTop: 8 }}>
                     <span className="price-value">
@@ -130,7 +118,6 @@ export default function BuyModal({ listing, onClose, onSuccess }) {
                 </div>
               </div>
 
-              {/* Step bar */}
               {needsApproval && (
                 <div className="step-bar" style={{ marginBottom: 20 }}>
                   <div className={`step ${currentStep >= 1 ? 'active' : ''}`}>
@@ -145,39 +132,29 @@ export default function BuyModal({ listing, onClose, onSuccess }) {
                 </div>
               )}
 
-              {error && (
-                <div className="error-banner" style={{ marginBottom: 16 }}>{error}</div>
-              )}
+              {error && <div className="error-banner" style={{ marginBottom: 16 }}>{error}</div>}
 
               {!address ? (
                 <p style={{ color: 'var(--text-secondary)', textAlign: 'center' }}>
-                  Connect your wallet to purchase this NFT.
+                  Connect your wallet to purchase.
                 </p>
               ) : needsApproval ? (
                 <>
                   <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem', marginBottom: 16 }}>
-                    First, approve the marketplace to spend your {symbol} tokens for this purchase.
+                    Approve the marketplace to spend your {symbol} for this purchase.
                   </p>
-                  <button
-                    className="btn btn-primary"
-                    style={{ width: '100%' }}
-                    onClick={handleApprove}
-                    disabled={loading}
-                  >
+                  <button className="btn btn-primary" style={{ width: '100%' }}
+                    onClick={handleApprove} disabled={loading}>
                     {loading ? 'Approving…' : `Approve ${symbol}`}
                   </button>
                 </>
               ) : (
                 <>
                   <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem', marginBottom: 16 }}>
-                    Confirm the purchase. Your {symbol} will be transferred to the seller.
+                    Confirm the purchase. Your {symbol} will be sent to the seller.
                   </p>
-                  <button
-                    className="btn btn-primary"
-                    style={{ width: '100%' }}
-                    onClick={handleBuy}
-                    disabled={loading}
-                  >
+                  <button className="btn btn-primary" style={{ width: '100%' }}
+                    onClick={handleBuy} disabled={loading}>
                     {loading ? 'Processing…' : 'Confirm Purchase'}
                   </button>
                 </>
@@ -188,17 +165,13 @@ export default function BuyModal({ listing, onClose, onSuccess }) {
           {step === STEP.DONE && (
             <div style={{ textAlign: 'center' }}>
               <div style={{ fontSize: '3rem', marginBottom: 16 }}>🎉</div>
-              <p style={{ marginBottom: 8 }}>
-                <strong>{meta?.name || `NFT #${listing.tokenId}`}</strong> is yours!
-              </p>
+              <p style={{ marginBottom: 8 }}><strong>{name}</strong> is yours!</p>
               {txId && (
                 <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', wordBreak: 'break-all', marginBottom: 20 }}>
                   Tx: {txId}
                 </p>
               )}
-              <button className="btn btn-primary" style={{ width: '100%' }} onClick={onClose}>
-                Done
-              </button>
+              <button className="btn btn-primary" style={{ width: '100%' }} onClick={onClose}>Done</button>
             </div>
           )}
         </div>

@@ -72,7 +72,7 @@ export function toRaw(humanStr, decimals = 8) {
   return BigInt(whole || '0') * BigInt(10 ** decimals) + BigInt(fracPadded || '0');
 }
 
-export function formatPrice(bigintOrNum, symbol = 'HODL', decimals = 8) {
+export function formatPrice(bigintOrNum, symbol = 'tWBTC', decimals = 8) {
   return `${toHuman(bigintOrNum, decimals)} ${symbol}`;
 }
 

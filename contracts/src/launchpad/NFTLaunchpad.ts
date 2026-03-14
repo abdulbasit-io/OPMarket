@@ -8,75 +8,125 @@ import {
     Revert,
     SafeMath,
     Selector,
+    StoredMapU256,
+    StoredString,
     StoredU256,
     encodeSelector,
 } from '@btc-vision/btc-runtime/runtime';
 import { EMPTY_POINTER } from '@btc-vision/btc-runtime/runtime/math/bytes';
+import { sha256 } from '@btc-vision/btc-runtime/runtime/env/global';
 
 // ═══════════════════════════════════════════════════════════
-// NFTLaunchpad — OP721 Collection Registration & Mint Coordination
+// NFTLaunchpad — Ownerless NFT Launchpad (no external contract needed)
 // ═══════════════════════════════════════════════════════════
 //
-// Creator flow:
-//   1. Deploy BaseNFT.ts (standard OP721 template)
-//   2. Call launchpad.register(nftContract, mintPrice, paymentToken,
-//                              maxSupply, startBlock, endBlock, royaltyBps, maxPerWallet)
-//   3. Call nftContract.setMinter(launchpadAddress)
-//   4. Mint window opens at startBlock — users call launchpad.mint(nftContract, quantity)
-//   5. After endBlock — creator calls launchpad.withdraw(nftContract) to collect proceeds
+// Collections are registered by creators directly on this contract.
+// Ownership is tracked internally via StoredMapU256 using composite keys.
+// Any Bitcoin-native asset (Ordinals, inscriptions, etc.) can be launched here.
 //
-// Payment: OP20 tokens pulled from buyer via transferFrom.
-// Launchpad must have MINTER_ROLE on the NFT contract (set via setMinter).
+// Creator flow:
+//   1. Call launchpad.registerCollection(name, symbol, imageURI, maxSupply,
+//          mintPrice, paymentToken, startBlock, endBlock, royaltyBps, maxPerWallet)
+//   2. Receive collectionId in response
+//   3. Users call launchpad.mint(collectionId, quantity) during mint window
+//   4. After endBlock, creator calls launchpad.withdraw(collectionId) to collect proceeds
 // ═══════════════════════════════════════════════════════════
 
 // ─── Cross-contract selectors ──────────────────────────────
-const SEL_MINT_TO:       Selector = encodeSelector('mintTo');
 const SEL_TRANSFER_FROM: Selector = encodeSelector('transferFrom');
-const SEL_TRANSFER:      Selector = encodeSelector('transfer');
+const SEL_TRANSFER: Selector      = encodeSelector('transfer');
 
 // ─── Global storage pointers ───────────────────────────────
-const deployerPointer: u16 = Blockchain.nextPointer;
+const deployerPtr:    u16 = Blockchain.nextPointer;
+const marketplacePtr: u16 = Blockchain.nextPointer;
+const collCounterPtr: u16 = Blockchain.nextPointer;
 
-// ─── Collection storage layout ─────────────────────────────
-// Keyed by lower 12 bits of the NFT contract address hash → 4096 buckets.
-// 10 fields per collection → max pointer: 100 + 4095*10 + 9 = 41 059 (fits in u16).
-//
-// NOTE: Two different NFT contracts whose address hashes share the same lower
-//       12 bits will collide into the same storage slot. For MVP testnet usage
-//       the probability is negligible (1/4096 per pair). An on-chain existence
-//       check (creator != 0) prevents silent overwrites.
-const COLLECTION_BASE:      u16 = 100;
-const SLOTS_PER_COLLECTION: u16 = 10;
+// ─── Per-collection map pointers ───────────────────────────
+const collCreatorMapPtr:      u16 = Blockchain.nextPointer;
+const collMintPriceMapPtr:    u16 = Blockchain.nextPointer;
+const collPayTokenMapPtr:     u16 = Blockchain.nextPointer;
+const collMaxSupplyMapPtr:    u16 = Blockchain.nextPointer;
+const collMintedMapPtr:       u16 = Blockchain.nextPointer;
+const collStartBlockMapPtr:   u16 = Blockchain.nextPointer;
+const collEndBlockMapPtr:     u16 = Blockchain.nextPointer;
+const collRoyaltyBpsMapPtr:   u16 = Blockchain.nextPointer;
+const collMaxPerWalletMapPtr: u16 = Blockchain.nextPointer;
+const collProceedsMapPtr:     u16 = Blockchain.nextPointer;
+const collNextTokenIdMapPtr:  u16 = Blockchain.nextPointer;
 
-// Field offsets within a collection's storage block
-const F_CREATOR:        u16 = 0; // u256 hash of creator address
-const F_PAYMENT_TOKEN:  u16 = 1; // u256 hash of OP20 payment token
-const F_MINT_PRICE:     u16 = 2; // mint price per NFT (raw token units)
-const F_MAX_SUPPLY:     u16 = 3; // max NFTs this collection can mint
-const F_MINTED:         u16 = 4; // total minted so far
-const F_START_BLOCK:    u16 = 5; // mint window opens at this block (u64 stored as u256)
-const F_END_BLOCK:      u16 = 6; // mint window closes at this block (u64 stored as u256)
-const F_ROYALTY_BPS:    u16 = 7; // royalty in basis points (0–1000)
-const F_PROCEEDS:       u16 = 8; // accumulated OP20 proceeds held in escrow
-const F_MAX_PER_WALLET: u16 = 9; // max mints per wallet (0 = unlimited)
+// ─── Per-collection string pointers ────────────────────────
+const collNameStrPtr:     u16 = Blockchain.nextPointer;
+const collSymbolStrPtr:   u16 = Blockchain.nextPointer;
+const collImageURIStrPtr: u16 = Blockchain.nextPointer;
 
-// ─── Per-wallet mint count storage ─────────────────────────
-// Key: lower 13 bits of (nftContractHash.lo1 XOR walletHash.lo1) → 8192 buckets.
-// Max pointer: 42 000 + 8 191 = 50 191 (fits in u16).
-const WALLET_MINT_BASE: u16 = 42000;
+// ─── Ownership & accounting map pointers ───────────────────
+const ownershipMapPtr:   u16 = Blockchain.nextPointer;
+const balanceMapPtr:     u16 = Blockchain.nextPointer;
+const walletMintMapPtr:  u16 = Blockchain.nextPointer;
 
 // ─── Constants ─────────────────────────────────────────────
 const MAX_ROYALTY_BPS: u256 = u256.fromU64(1000); // 10% max
 
+// ─── Composite key helper ───────────────────────────────────
+function compositeKey(a: u256, b: u256): u256 {
+    const buf = new Uint8Array(64);
+    const aBytes = a.toUint8Array(true);
+    const bBytes = b.toUint8Array(true);
+    for (let i = 0; i < 32; i++) buf[i] = aBytes[i];
+    for (let i = 0; i < 32; i++) buf[32 + i] = bBytes[i];
+    return u256.fromUint8ArrayBE(sha256(buf));
+}
+
 @final
 export class NFTLaunchpad extends OP_NET {
-    private readonly _deployer: StoredU256;
+    // ─── Global state ────────────────────────────────────
+    private readonly _deployer:    StoredU256;
+    private readonly _marketplace: StoredU256;
+    private readonly _collCounter: StoredU256;
+
+    // ─── Per-collection numeric maps ─────────────────────
+    private readonly _collCreatorMap:      StoredMapU256;
+    private readonly _collMintPriceMap:    StoredMapU256;
+    private readonly _collPayTokenMap:     StoredMapU256;
+    private readonly _collMaxSupplyMap:    StoredMapU256;
+    private readonly _collMintedMap:       StoredMapU256;
+    private readonly _collStartBlockMap:   StoredMapU256;
+    private readonly _collEndBlockMap:     StoredMapU256;
+    private readonly _collRoyaltyBpsMap:   StoredMapU256;
+    private readonly _collMaxPerWalletMap: StoredMapU256;
+    private readonly _collProceedsMap:     StoredMapU256;
+    private readonly _collNextTokenIdMap:  StoredMapU256;
+
+    // ─── Ownership & accounting maps ─────────────────────
+    private readonly _ownershipMap:  StoredMapU256;
+    private readonly _balanceMap:    StoredMapU256;
+    private readonly _walletMintMap: StoredMapU256;
 
     public constructor() {
         super();
-        this._deployer = new StoredU256(deployerPointer, EMPTY_POINTER);
+        this._deployer    = new StoredU256(deployerPtr, EMPTY_POINTER);
+        this._marketplace = new StoredU256(marketplacePtr, EMPTY_POINTER);
+        this._collCounter = new StoredU256(collCounterPtr, EMPTY_POINTER);
+
+        this._collCreatorMap      = new StoredMapU256(collCreatorMapPtr);
+        this._collMintPriceMap    = new StoredMapU256(collMintPriceMapPtr);
+        this._collPayTokenMap     = new StoredMapU256(collPayTokenMapPtr);
+        this._collMaxSupplyMap    = new StoredMapU256(collMaxSupplyMapPtr);
+        this._collMintedMap       = new StoredMapU256(collMintedMapPtr);
+        this._collStartBlockMap   = new StoredMapU256(collStartBlockMapPtr);
+        this._collEndBlockMap     = new StoredMapU256(collEndBlockMapPtr);
+        this._collRoyaltyBpsMap   = new StoredMapU256(collRoyaltyBpsMapPtr);
+        this._collMaxPerWalletMap = new StoredMapU256(collMaxPerWalletMapPtr);
+        this._collProceedsMap     = new StoredMapU256(collProceedsMapPtr);
+        this._collNextTokenIdMap  = new StoredMapU256(collNextTokenIdMapPtr);
+
+        this._ownershipMap  = new StoredMapU256(ownershipMapPtr);
+        this._balanceMap    = new StoredMapU256(balanceMapPtr);
+        this._walletMintMap = new StoredMapU256(walletMintMapPtr);
     }
 
+    // ─── Deployment ────────────────────────────────────────
+    // No calldata required. Link the marketplace after deployment via setMarketplace().
     public override onDeployment(_calldata: Calldata): void {
         this._deployer.set(u256.fromUint8ArrayBE(Blockchain.tx.origin));
     }
@@ -85,14 +135,14 @@ export class NFTLaunchpad extends OP_NET {
         super.onUpdate(_calldata);
     }
 
-    // ─── Auth ──────────────────────────────────────────────
+    // ─── Auth ───────────────────────────────────────────────
     private requireDeployer(caller: Address): void {
         if (!u256.eq(u256.fromUint8ArrayBE(caller), this._deployer.value)) {
             throw new Revert('Only deployer');
         }
     }
 
-    // ─── Address helpers ───────────────────────────────────
+    // ─── Address helpers ────────────────────────────────────
     private addrToU256(addr: Address): u256 {
         return u256.fromUint8ArrayBE(addr);
     }
@@ -110,53 +160,9 @@ export class NFTLaunchpad extends OP_NET {
         return changetype<Address>(buf);
     }
 
-    // ─── Collection storage helpers ────────────────────────
-    private collectionPointer(nftHash: u256, field: u16): u16 {
-        const slot: u16 = <u16>(nftHash.lo1 & 0xFFF);
-        return COLLECTION_BASE + slot * SLOTS_PER_COLLECTION + field;
-    }
+    // ─── Cross-contract helpers ─────────────────────────────
 
-    private storeCollField(nftHash: u256, field: u16, value: u256): void {
-        new StoredU256(this.collectionPointer(nftHash, field), EMPTY_POINTER).set(value);
-    }
-
-    private readCollField(nftHash: u256, field: u16): u256 {
-        return new StoredU256(this.collectionPointer(nftHash, field), EMPTY_POINTER).value;
-    }
-
-    // ─── Per-wallet mint count helpers ─────────────────────
-    private walletMintPointer(nftHash: u256, walletHash: u256): u16 {
-        const combined: u16 = <u16>((nftHash.lo1 ^ walletHash.lo1) & 0x1FFF);
-        return WALLET_MINT_BASE + combined;
-    }
-
-    private getWalletMintedCount(nftHash: u256, walletHash: u256): u256 {
-        return new StoredU256(this.walletMintPointer(nftHash, walletHash), EMPTY_POINTER).value;
-    }
-
-    private incrementWalletMinted(nftHash: u256, walletHash: u256, qty: u256): void {
-        const s = new StoredU256(this.walletMintPointer(nftHash, walletHash), EMPTY_POINTER);
-        s.set(SafeMath.add(s.value, qty));
-    }
-
-    // ─── Cross-contract calls ──────────────────────────────
-
-    // BaseNFT.mintTo(to, quantity) → firstTokenId
-    // Launchpad must be set as minter via nftContract.setMinter(launchpadAddress)
-    private callMintTo(nftContract: Address, to: Address, quantity: u256): u256 {
-        // 4 (selector) + 32 (to) + 32 (quantity) = 68 bytes
-        const cd = new BytesWriter(68);
-        cd.writeSelector(SEL_MINT_TO);
-        cd.writeAddress(to);
-        cd.writeU256(quantity);
-        const result = Blockchain.call(nftContract, cd, true);
-        if (result.data.byteLength < 32) return u256.Zero;
-        return result.data.readU256();
-    }
-
-    // OP20.transferFrom(from, to, amount)
     private callTransferFrom(token: Address, from: Address, to: Address, amount: u256): void {
-        // 4 + 32 + 32 + 32 = 100 bytes
         const cd = new BytesWriter(100);
         cd.writeSelector(SEL_TRANSFER_FROM);
         cd.writeAddress(from);
@@ -165,9 +171,7 @@ export class NFTLaunchpad extends OP_NET {
         Blockchain.call(token, cd, true);
     }
 
-    // OP20.transfer(to, amount) — called from launchpad as sender (holds the proceeds)
     private callTransfer(token: Address, to: Address, amount: u256): void {
-        // 4 + 32 + 32 = 68 bytes
         const cd = new BytesWriter(68);
         cd.writeSelector(SEL_TRANSFER);
         cd.writeAddress(to);
@@ -175,134 +179,158 @@ export class NFTLaunchpad extends OP_NET {
         Blockchain.call(token, cd, true);
     }
 
-    // ─── register ──────────────────────────────────────────
-    // Creator registers a BaseNFT collection with the launchpad.
-    // Must call nftContract.setMinter(launchpadAddress) after this.
-    //
-    // startBlock: first block where minting is allowed
-    // endBlock:   first block where minting is no longer allowed
-    // maxPerWallet: 0 = unlimited
+    // ─── registerCollection ─────────────────────────────────
     @method(
-        { name: 'nftContract',  type: ABIDataTypes.ADDRESS },
+        { name: 'name',         type: ABIDataTypes.STRING  },
+        { name: 'symbol',       type: ABIDataTypes.STRING  },
+        { name: 'imageURI',     type: ABIDataTypes.STRING  },
+        { name: 'maxSupply',    type: ABIDataTypes.UINT256 },
         { name: 'mintPrice',    type: ABIDataTypes.UINT256 },
         { name: 'paymentToken', type: ABIDataTypes.ADDRESS },
-        { name: 'maxSupply',    type: ABIDataTypes.UINT256 },
         { name: 'startBlock',   type: ABIDataTypes.UINT256 },
         { name: 'endBlock',     type: ABIDataTypes.UINT256 },
         { name: 'royaltyBps',   type: ABIDataTypes.UINT256 },
         { name: 'maxPerWallet', type: ABIDataTypes.UINT256 },
     )
-    @returns({ name: 'success', type: ABIDataTypes.BOOL })
-    public register(calldata: Calldata): BytesWriter {
-        const nftContract:  Address = calldata.readAddress();
+    @returns({ name: 'collectionId', type: ABIDataTypes.UINT256 })
+    public registerCollection(calldata: Calldata): BytesWriter {
+        const name:         string  = calldata.readStringWithLength();
+        const symbol:       string  = calldata.readStringWithLength();
+        const imageURI:     string  = calldata.readStringWithLength();
+        const maxSupply:    u256    = calldata.readU256();
         const mintPrice:    u256    = calldata.readU256();
         const paymentToken: Address = calldata.readAddress();
-        const maxSupply:    u256    = calldata.readU256();
         const startBlock:   u256    = calldata.readU256();
         const endBlock:     u256    = calldata.readU256();
         const royaltyBps:   u256    = calldata.readU256();
         const maxPerWallet: u256    = calldata.readU256();
 
+        if (name.length === 0)                        throw new Revert('Name required');
+        if (symbol.length === 0)                      throw new Revert('Symbol required');
         if (maxSupply.isZero())                        throw new Revert('maxSupply must be > 0');
-        if (u256.gt(royaltyBps, MAX_ROYALTY_BPS))      throw new Revert('Royalty exceeds 10%');
         if (!u256.lt(startBlock, endBlock))            throw new Revert('startBlock must be < endBlock');
+        if (u256.gt(royaltyBps, MAX_ROYALTY_BPS))     throw new Revert('Royalty exceeds 10%');
 
-        const nftHash: u256 = this.addrToU256(nftContract);
+        const caller: Address = Blockchain.tx.sender;
+        const callerHash: u256 = this.addrToU256(caller);
 
-        // Prevent re-registration: creator slot non-zero means already registered
-        if (!this.readCollField(nftHash, F_CREATOR).isZero()) {
-            throw new Revert('Collection already registered');
-        }
+        // Assign collection ID from counter
+        const collId: u256 = this._collCounter.value;
 
-        this.storeCollField(nftHash, F_CREATOR,        this.addrToU256(Blockchain.tx.sender));
-        this.storeCollField(nftHash, F_PAYMENT_TOKEN,  this.addrToU256(paymentToken));
-        this.storeCollField(nftHash, F_MINT_PRICE,     mintPrice);
-        this.storeCollField(nftHash, F_MAX_SUPPLY,     maxSupply);
-        this.storeCollField(nftHash, F_MINTED,         u256.Zero);
-        this.storeCollField(nftHash, F_START_BLOCK,    startBlock);
-        this.storeCollField(nftHash, F_END_BLOCK,      endBlock);
-        this.storeCollField(nftHash, F_ROYALTY_BPS,    royaltyBps);
-        this.storeCollField(nftHash, F_PROCEEDS,       u256.Zero);
-        this.storeCollField(nftHash, F_MAX_PER_WALLET, maxPerWallet);
+        // Store all collection data
+        this._collCreatorMap.set(collId, callerHash);
+        this._collMintPriceMap.set(collId, mintPrice);
+        this._collPayTokenMap.set(collId, this.addrToU256(paymentToken));
+        this._collMaxSupplyMap.set(collId, maxSupply);
+        this._collMintedMap.set(collId, u256.Zero);
+        this._collStartBlockMap.set(collId, startBlock);
+        this._collEndBlockMap.set(collId, endBlock);
+        this._collRoyaltyBpsMap.set(collId, royaltyBps);
+        this._collMaxPerWalletMap.set(collId, maxPerWallet);
+        this._collProceedsMap.set(collId, u256.Zero);
+        this._collNextTokenIdMap.set(collId, u256.Zero);
 
-        const writer = new BytesWriter(1);
-        writer.writeBoolean(true);
+        // Store string metadata per collection using index = collId.lo1
+        const idx: u64 = collId.lo1;
+        const nameStore = new StoredString(collNameStrPtr, idx);
+        nameStore.value = name;
+        const symbolStore = new StoredString(collSymbolStrPtr, idx);
+        symbolStore.value = symbol;
+        const imageStore = new StoredString(collImageURIStrPtr, idx);
+        imageStore.value = imageURI;
+
+        // Increment counter
+        this._collCounter.set(SafeMath.add(collId, u256.One));
+
+        const writer = new BytesWriter(32);
+        writer.writeU256(collId);
         return writer;
     }
 
-    // ─── mint ──────────────────────────────────────────────
-    // User mints `quantity` NFTs from a registered collection.
-    // Buyer must have approved launchpad to spend their payment tokens:
-    //   paymentToken.approve(launchpadAddress, mintPrice * quantity)
-    //
-    // Returns the firstTokenId minted (forwarded from BaseNFT.mintTo).
+    // ─── mint ───────────────────────────────────────────────
     @method(
-        { name: 'nftContract', type: ABIDataTypes.ADDRESS },
-        { name: 'quantity',    type: ABIDataTypes.UINT256 },
+        { name: 'collectionId', type: ABIDataTypes.UINT256 },
+        { name: 'quantity',     type: ABIDataTypes.UINT256 },
     )
     @returns({ name: 'firstTokenId', type: ABIDataTypes.UINT256 })
+    @emit('Transferred')
     public mint(calldata: Calldata): BytesWriter {
-        const nftContract: Address = calldata.readAddress();
-        const quantity:    u256    = calldata.readU256();
+        const collId:   u256 = calldata.readU256();
+        const quantity: u256 = calldata.readU256();
 
         if (quantity.isZero()) throw new Revert('Quantity must be > 0');
 
-        const nftHash: u256 = this.addrToU256(nftContract);
-
-        const creatorHash: u256 = this.readCollField(nftHash, F_CREATOR);
+        // Validate collection is registered
+        const creatorHash: u256 = this._collCreatorMap.get(collId);
         if (creatorHash.isZero()) throw new Revert('Collection not registered');
 
-        // ── Validate mint window ────────────────────────────
+        // Validate mint window
         const currentBlock: u256 = u256.fromU64(Blockchain.block.number);
-        const startBlock:   u256 = this.readCollField(nftHash, F_START_BLOCK);
-        const endBlock:     u256 = this.readCollField(nftHash, F_END_BLOCK);
-
+        const startBlock:   u256 = this._collStartBlockMap.get(collId);
+        const endBlock:     u256 = this._collEndBlockMap.get(collId);
         if (u256.lt(currentBlock, startBlock)) throw new Revert('Mint has not started');
         if (!u256.lt(currentBlock, endBlock))  throw new Revert('Mint window has closed');
 
-        // ── Validate supply cap ─────────────────────────────
-        const maxSupply:  u256 = this.readCollField(nftHash, F_MAX_SUPPLY);
-        const minted:     u256 = this.readCollField(nftHash, F_MINTED);
-
+        // Validate supply cap
+        const maxSupply: u256 = this._collMaxSupplyMap.get(collId);
+        const minted:    u256 = this._collMintedMap.get(collId);
         if (u256.gt(SafeMath.add(minted, quantity), maxSupply)) {
             throw new Revert('Exceeds max supply');
         }
 
-        // ── Validate per-wallet limit ───────────────────────
-        const buyer:      Address = Blockchain.tx.sender;
-        const buyerHash:  u256    = this.addrToU256(buyer);
-        const maxPerWallet: u256  = this.readCollField(nftHash, F_MAX_PER_WALLET);
+        const buyer:     Address = Blockchain.tx.sender;
+        const buyerHash: u256    = this.addrToU256(buyer);
 
+        // Validate per-wallet limit
+        const maxPerWallet: u256 = this._collMaxPerWalletMap.get(collId);
         if (!maxPerWallet.isZero()) {
-            const walletMinted: u256 = this.getWalletMintedCount(nftHash, buyerHash);
+            const walletKey:    u256 = compositeKey(collId, buyerHash);
+            const walletMinted: u256 = this._walletMintMap.get(walletKey);
             if (u256.gt(SafeMath.add(walletMinted, quantity), maxPerWallet)) {
                 throw new Revert('Exceeds per-wallet mint limit');
             }
         }
 
-        // ── Collect payment ─────────────────────────────────
-        const mintPrice: u256 = this.readCollField(nftHash, F_MINT_PRICE);
-        const totalCost: u256 = SafeMath.mul(mintPrice, quantity);
-
+        // Collect payment
+        const mintPrice:  u256 = this._collMintPriceMap.get(collId);
+        const totalCost:  u256 = SafeMath.mul(mintPrice, quantity);
         if (!totalCost.isZero()) {
-            const paymentToken: Address = this.u256ToAddr(this.readCollField(nftHash, F_PAYMENT_TOKEN));
-            // Pull payment from buyer into launchpad escrow
+            const paymentToken: Address = this.u256ToAddr(this._collPayTokenMap.get(collId));
             this.callTransferFrom(paymentToken, buyer, Blockchain.contractAddress, totalCost);
         }
 
-        // ── Mint NFTs ───────────────────────────────────────
-        const firstTokenId: u256 = this.callMintTo(nftContract, buyer, quantity);
+        // Mint tokens — record ownership for each
+        const nextTokenId: u256 = this._collNextTokenIdMap.get(collId);
+        const firstTokenId: u256 = nextTokenId;
 
-        // ── Update state ────────────────────────────────────
-        this.storeCollField(nftHash, F_MINTED, SafeMath.add(minted, quantity));
-
-        if (!totalCost.isZero()) {
-            const proceeds: u256 = this.readCollField(nftHash, F_PROCEEDS);
-            this.storeCollField(nftHash, F_PROCEEDS, SafeMath.add(proceeds, totalCost));
+        let i: u256 = u256.Zero;
+        while (u256.lt(i, quantity)) {
+            const tokenId: u256 = SafeMath.add(nextTokenId, i);
+            const ownerKey: u256 = compositeKey(collId, tokenId);
+            this._ownershipMap.set(ownerKey, buyerHash);
+            i = SafeMath.add(i, u256.One);
         }
 
+        // Update balance
+        const balKey:     u256 = compositeKey(collId, buyerHash);
+        const oldBalance: u256 = this._balanceMap.get(balKey);
+        this._balanceMap.set(balKey, SafeMath.add(oldBalance, quantity));
+
+        // Update wallet mint count if limited
         if (!maxPerWallet.isZero()) {
-            this.incrementWalletMinted(nftHash, buyerHash, quantity);
+            const walletKey:    u256 = compositeKey(collId, buyerHash);
+            const walletMinted: u256 = this._walletMintMap.get(walletKey);
+            this._walletMintMap.set(walletKey, SafeMath.add(walletMinted, quantity));
+        }
+
+        // Update minted count and nextTokenId
+        this._collMintedMap.set(collId, SafeMath.add(minted, quantity));
+        this._collNextTokenIdMap.set(collId, SafeMath.add(nextTokenId, quantity));
+
+        // Update proceeds
+        if (!totalCost.isZero()) {
+            const proceeds: u256 = this._collProceedsMap.get(collId);
+            this._collProceedsMap.set(collId, SafeMath.add(proceeds, totalCost));
         }
 
         const writer = new BytesWriter(32);
@@ -310,32 +338,27 @@ export class NFTLaunchpad extends OP_NET {
         return writer;
     }
 
-    // ─── withdraw ──────────────────────────────────────────
-    // Creator withdraws accumulated OP20 proceeds after the mint ends.
-    // Can be called any time after the mint window closes (endBlock passed).
-    // Proceeds are zeroed before the transfer to prevent reentrancy.
-    @method({ name: 'nftContract', type: ABIDataTypes.ADDRESS })
+    // ─── withdraw ───────────────────────────────────────────
+    @method({ name: 'collectionId', type: ABIDataTypes.UINT256 })
     @returns({ name: 'amount', type: ABIDataTypes.UINT256 })
     public withdraw(calldata: Calldata): BytesWriter {
-        const nftContract: Address = calldata.readAddress();
-        const nftHash:     u256    = this.addrToU256(nftContract);
+        const collId: u256 = calldata.readU256();
 
-        const creatorHash: u256 = this.readCollField(nftHash, F_CREATOR);
+        const creatorHash: u256 = this._collCreatorMap.get(collId);
         if (creatorHash.isZero()) throw new Revert('Collection not registered');
 
         if (!u256.eq(this.addrToU256(Blockchain.tx.sender), creatorHash)) {
             throw new Revert('Only creator can withdraw');
         }
 
-        const proceeds: u256 = this.readCollField(nftHash, F_PROCEEDS);
+        const proceeds: u256 = this._collProceedsMap.get(collId);
         if (proceeds.isZero()) throw new Revert('No proceeds to withdraw');
 
-        const paymentToken: Address = this.u256ToAddr(this.readCollField(nftHash, F_PAYMENT_TOKEN));
+        const paymentToken: Address = this.u256ToAddr(this._collPayTokenMap.get(collId));
         const creator:      Address = this.u256ToAddr(creatorHash);
 
         // Zero proceeds before transfer (reentrancy guard)
-        this.storeCollField(nftHash, F_PROCEEDS, u256.Zero);
-
+        this._collProceedsMap.set(collId, u256.Zero);
         this.callTransfer(paymentToken, creator, proceeds);
 
         const writer = new BytesWriter(32);
@@ -343,62 +366,172 @@ export class NFTLaunchpad extends OP_NET {
         return writer;
     }
 
-    // ─── getCollection ─────────────────────────────────────
-    @method({ name: 'nftContract', type: ABIDataTypes.ADDRESS })
+    // ─── marketplaceTransfer ────────────────────────────────
+    // Called exclusively by the registered marketplace contract to execute
+    // secondary-market transfers. Verifies current ownership of the token.
+    @method(
+        { name: 'collectionId', type: ABIDataTypes.UINT256 },
+        { name: 'tokenId',      type: ABIDataTypes.UINT256 },
+        { name: 'from',         type: ABIDataTypes.ADDRESS },
+        { name: 'to',           type: ABIDataTypes.ADDRESS },
+    )
+    @returns({ name: 'success', type: ABIDataTypes.BOOL })
+    public marketplaceTransfer(calldata: Calldata): BytesWriter {
+        const collId:  u256    = calldata.readU256();
+        const tokenId: u256    = calldata.readU256();
+        const from:    Address = calldata.readAddress();
+        const to:      Address = calldata.readAddress();
+
+        // Only the registered marketplace may call this
+        const callerHash: u256 = this.addrToU256(Blockchain.tx.sender);
+        if (!u256.eq(callerHash, this._marketplace.value)) {
+            throw new Revert('Only marketplace');
+        }
+
+        const fromHash: u256 = this.addrToU256(from);
+        const toHash:   u256 = this.addrToU256(to);
+
+        // Verify current ownership
+        const ownerKey:    u256 = compositeKey(collId, tokenId);
+        const currentOwner: u256 = this._ownershipMap.get(ownerKey);
+        if (!u256.eq(currentOwner, fromHash)) {
+            throw new Revert('Not token owner');
+        }
+
+        // Transfer ownership
+        this._ownershipMap.set(ownerKey, toHash);
+
+        // Update sender balance (subtract 1)
+        const fromBalKey: u256 = compositeKey(collId, fromHash);
+        const fromBal:    u256 = this._balanceMap.get(fromBalKey);
+        if (fromBal.isZero()) throw new Revert('Balance underflow');
+        this._balanceMap.set(fromBalKey, SafeMath.sub(fromBal, u256.One));
+
+        // Update receiver balance (add 1)
+        const toBalKey: u256 = compositeKey(collId, toHash);
+        const toBal:    u256 = this._balanceMap.get(toBalKey);
+        this._balanceMap.set(toBalKey, SafeMath.add(toBal, u256.One));
+
+        const writer = new BytesWriter(1);
+        writer.writeBoolean(true);
+        return writer;
+    }
+
+    // ─── ownerOf ────────────────────────────────────────────
+    @method(
+        { name: 'collectionId', type: ABIDataTypes.UINT256 },
+        { name: 'tokenId',      type: ABIDataTypes.UINT256 },
+    )
+    @returns({ name: 'owner', type: ABIDataTypes.UINT256 })
+    @view
+    public ownerOf(calldata: Calldata): BytesWriter {
+        const collId:  u256 = calldata.readU256();
+        const tokenId: u256 = calldata.readU256();
+
+        const ownerKey: u256 = compositeKey(collId, tokenId);
+        const owner:    u256 = this._ownershipMap.get(ownerKey);
+
+        const writer = new BytesWriter(32);
+        writer.writeU256(owner);
+        return writer;
+    }
+
+    // ─── balanceOf ──────────────────────────────────────────
+    @method(
+        { name: 'collectionId', type: ABIDataTypes.UINT256 },
+        { name: 'owner',        type: ABIDataTypes.ADDRESS },
+    )
+    @returns({ name: 'balance', type: ABIDataTypes.UINT256 })
+    @view
+    public balanceOf(calldata: Calldata): BytesWriter {
+        const collId:    u256    = calldata.readU256();
+        const ownerAddr: Address = calldata.readAddress();
+
+        const ownerHash: u256 = this.addrToU256(ownerAddr);
+        const balKey:    u256 = compositeKey(collId, ownerHash);
+        const balance:   u256 = this._balanceMap.get(balKey);
+
+        const writer = new BytesWriter(32);
+        writer.writeU256(balance);
+        return writer;
+    }
+
+    // ─── getCollection ──────────────────────────────────────
+    @method({ name: 'collectionId', type: ABIDataTypes.UINT256 })
     @returns(
         { name: 'creator',       type: ABIDataTypes.UINT256 },
-        { name: 'paymentToken',  type: ABIDataTypes.UINT256 },
         { name: 'mintPrice',     type: ABIDataTypes.UINT256 },
+        { name: 'paymentToken',  type: ABIDataTypes.UINT256 },
         { name: 'maxSupply',     type: ABIDataTypes.UINT256 },
         { name: 'minted',        type: ABIDataTypes.UINT256 },
         { name: 'startBlock',    type: ABIDataTypes.UINT256 },
         { name: 'endBlock',      type: ABIDataTypes.UINT256 },
         { name: 'royaltyBps',    type: ABIDataTypes.UINT256 },
-        { name: 'proceeds',      type: ABIDataTypes.UINT256 },
         { name: 'maxPerWallet',  type: ABIDataTypes.UINT256 },
+        { name: 'proceeds',      type: ABIDataTypes.UINT256 },
     )
     @view
     public getCollection(calldata: Calldata): BytesWriter {
-        const nftHash: u256 = this.addrToU256(calldata.readAddress());
+        const collId: u256 = calldata.readU256();
 
         const writer = new BytesWriter(320); // 10 × 32 bytes
-        writer.writeU256(this.readCollField(nftHash, F_CREATOR));
-        writer.writeU256(this.readCollField(nftHash, F_PAYMENT_TOKEN));
-        writer.writeU256(this.readCollField(nftHash, F_MINT_PRICE));
-        writer.writeU256(this.readCollField(nftHash, F_MAX_SUPPLY));
-        writer.writeU256(this.readCollField(nftHash, F_MINTED));
-        writer.writeU256(this.readCollField(nftHash, F_START_BLOCK));
-        writer.writeU256(this.readCollField(nftHash, F_END_BLOCK));
-        writer.writeU256(this.readCollField(nftHash, F_ROYALTY_BPS));
-        writer.writeU256(this.readCollField(nftHash, F_PROCEEDS));
-        writer.writeU256(this.readCollField(nftHash, F_MAX_PER_WALLET));
+        writer.writeU256(this._collCreatorMap.get(collId));
+        writer.writeU256(this._collMintPriceMap.get(collId));
+        writer.writeU256(this._collPayTokenMap.get(collId));
+        writer.writeU256(this._collMaxSupplyMap.get(collId));
+        writer.writeU256(this._collMintedMap.get(collId));
+        writer.writeU256(this._collStartBlockMap.get(collId));
+        writer.writeU256(this._collEndBlockMap.get(collId));
+        writer.writeU256(this._collRoyaltyBpsMap.get(collId));
+        writer.writeU256(this._collMaxPerWalletMap.get(collId));
+        writer.writeU256(this._collProceedsMap.get(collId));
         return writer;
     }
 
-    // ─── getMinted ─────────────────────────────────────────
-    @method({ name: 'nftContract', type: ABIDataTypes.ADDRESS })
-    @returns({ name: 'minted', type: ABIDataTypes.UINT256 })
+    // ─── getCollectionCount ─────────────────────────────────
+    @method()
+    @returns({ name: 'count', type: ABIDataTypes.UINT256 })
     @view
-    public getMinted(calldata: Calldata): BytesWriter {
-        const nftHash: u256 = this.addrToU256(calldata.readAddress());
+    public getCollectionCount(_: Calldata): BytesWriter {
         const writer = new BytesWriter(32);
-        writer.writeU256(this.readCollField(nftHash, F_MINTED));
+        writer.writeU256(this._collCounter.value);
         return writer;
     }
 
-    // ─── getWalletMintCount ────────────────────────────────
-    // Returns how many NFTs `wallet` has minted from `nftContract` via this launchpad.
-    @method(
-        { name: 'nftContract', type: ABIDataTypes.ADDRESS },
-        { name: 'wallet',      type: ABIDataTypes.ADDRESS },
+    // ─── getCollectionStrings ────────────────────────────────
+    // Returns name, symbol, and imageURI for a collection.
+    @method({ name: 'collectionId', type: ABIDataTypes.UINT256 })
+    @returns(
+        { name: 'name',     type: ABIDataTypes.STRING },
+        { name: 'symbol',   type: ABIDataTypes.STRING },
+        { name: 'imageURI', type: ABIDataTypes.STRING },
     )
-    @returns({ name: 'minted', type: ABIDataTypes.UINT256 })
     @view
-    public getWalletMintCount(calldata: Calldata): BytesWriter {
-        const nftHash:    u256 = this.addrToU256(calldata.readAddress());
-        const walletHash: u256 = this.addrToU256(calldata.readAddress());
-        const writer = new BytesWriter(32);
-        writer.writeU256(this.getWalletMintedCount(nftHash, walletHash));
+    public getCollectionStrings(calldata: Calldata): BytesWriter {
+        const collId: u256 = calldata.readU256();
+        const idx: u64 = collId.lo1;
+
+        const name:     string = new StoredString(collNameStrPtr, idx).value;
+        const symbol:   string = new StoredString(collSymbolStrPtr, idx).value;
+        const imageURI: string = new StoredString(collImageURIStrPtr, idx).value;
+
+        const writer = new BytesWriter(name.length + symbol.length + imageURI.length + 24);
+        writer.writeStringWithLength(name);
+        writer.writeStringWithLength(symbol);
+        writer.writeStringWithLength(imageURI);
+        return writer;
+    }
+
+    // ─── setMarketplace ─────────────────────────────────────
+    @method({ name: 'marketplace', type: ABIDataTypes.ADDRESS })
+    @returns({ name: 'success', type: ABIDataTypes.BOOL })
+    public setMarketplace(calldata: Calldata): BytesWriter {
+        this.requireDeployer(Blockchain.tx.sender);
+        const marketplace: Address = calldata.readAddress();
+        this._marketplace.set(this.addrToU256(marketplace));
+
+        const writer = new BytesWriter(1);
+        writer.writeBoolean(true);
         return writer;
     }
 }

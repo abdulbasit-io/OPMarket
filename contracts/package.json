@@ -4,10 +4,9 @@
     "description": "NFT Marketplace + Launchpad smart contracts for OPNet (Bitcoin L1)",
     "main": "index.js",
     "scripts": {
-        "build:nft": "node node_modules/@btc-vision/assemblyscript/bin/asc.js src/nft/index.ts --target nft --measure --uncheckedBehavior never --config asconfig.json",
-        "build:marketplace": "node node_modules/@btc-vision/assemblyscript/bin/asc.js src/marketplace/index.ts --target marketplace --measure --uncheckedBehavior never --config asconfig.json",
         "build:launchpad": "node node_modules/@btc-vision/assemblyscript/bin/asc.js src/launchpad/index.ts --target launchpad --measure --uncheckedBehavior never --config asconfig.json",
-        "build": "npm run build:nft && npm run build:marketplace && npm run build:launchpad"
+        "build:marketplace": "node node_modules/@btc-vision/assemblyscript/bin/asc.js src/marketplace/index.ts --target marketplace --measure --uncheckedBehavior never --config asconfig.json",
+        "build": "npm run build:launchpad && npm run build:marketplace"
     },
     "author": "OPNet NFT Marketplace",
     "license": "MIT",

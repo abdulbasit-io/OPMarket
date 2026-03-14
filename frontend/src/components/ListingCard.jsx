@@ -1,14 +1,25 @@
 import { useState, useEffect } from 'react';
 import NFTImage from './NFTImage';
-import { truncateAddress, formatPrice, toHuman } from '../utils/formatters';
-import { getTokenURI, fetchNFTMetadata, getTokenSymbol } from '../utils/contractService';
+import { truncateAddress, toHuman } from '../utils/formatters';
+import { getCollection, getTokenSymbol } from '../utils/contractService';
 import { PAYMENT_TOKENS, TOKEN_DECIMALS } from '../utils/constants';
 import { useWallet } from '../context/WalletContext';
 
+// Module-level cache so all cards for the same collection share one fetch
+const _collCache = new Map();
+
+async function cachedGetCollection(id) {
+  const key = String(id);
+  if (_collCache.has(key)) return _collCache.get(key);
+  const p = getCollection(id);
+  _collCache.set(key, p);
+  return p;
+}
+
 export default function ListingCard({ listing, onBuy, onCancel }) {
   const { address } = useWallet();
-  const [meta,   setMeta]   = useState(null);
-  const [symbol, setSymbol] = useState('HODL');
+  const [coll,    setColl]    = useState(null);
+  const [symbol,  setSymbol]  = useState('tWBTC');
   const [loading, setLoading] = useState(true);
 
   const isMine = address && listing.seller &&
@@ -28,22 +39,20 @@ export default function ListingCard({ listing, onBuy, onCancel }) {
           if (!cancelled) setSymbol(sym);
         }
 
-        // Resolve NFT metadata
-        const uri = await getTokenURI(listing.nftContract, listing.tokenId);
-        if (uri) {
-          const m = await fetchNFTMetadata(uri);
-          if (!cancelled) setMeta(m);
-        }
+        // Resolve collection metadata for image/name
+        const collData = await cachedGetCollection(listing.collectionId);
+        if (!cancelled) setColl(collData);
       } finally {
         if (!cancelled) setLoading(false);
       }
     })();
     return () => { cancelled = true; };
-  }, [listing.nftContract, listing.tokenId, listing.paymentToken]);
+  }, [listing.collectionId, listing.paymentToken]);
 
-  const decimals = listing.paymentToken
-    ? (PAYMENT_TOKENS[listing.paymentToken]?.decimals ?? TOKEN_DECIMALS)
-    : TOKEN_DECIMALS;
+  const decimals = PAYMENT_TOKENS[listing.paymentToken]?.decimals ?? TOKEN_DECIMALS;
+  const image    = coll?.imageURI || null;
+  const name     = coll ? `${coll.name} #${listing.tokenId}` : `Collection ${listing.collectionId} #${listing.tokenId}`;
+  const collName = coll?.name || `Collection #${String(listing.collectionId)}`;
 
   return (
     <article className="card listing-card">
@@ -53,10 +62,8 @@ export default function ListingCard({ listing, onBuy, onCancel }) {
           <div className="skeleton" style={{ height: '100%', borderRadius: 'var(--radius)' }} />
         ) : (
           <NFTImage
-            src={meta?.image}
-            alt={meta?.name || `#${listing.tokenId}`}
-            contractAddr={listing.nftContract}
-            tokenId={listing.tokenId}
+            src={image}
+            alt={name}
             style={{ width: '100%', height: '100%', objectFit: 'cover' }}
           />
         )}
@@ -69,11 +76,9 @@ export default function ListingCard({ listing, onBuy, onCancel }) {
             <div className="listing-card-name">
               {loading
                 ? <span className="skeleton" style={{ width: 120, height: 16, display: 'inline-block' }} />
-                : (meta?.name || `NFT #${listing.tokenId}`)}
+                : name}
             </div>
-            <div className="listing-card-collection">
-              {truncateAddress(listing.nftContract)}
-            </div>
+            <div className="listing-card-collection">{collName}</div>
           </div>
           <span className="badge badge-brand" style={{ fontSize: '0.7rem' }}>
             #{String(listing.tokenId)}
@@ -97,7 +102,6 @@ export default function ListingCard({ listing, onBuy, onCancel }) {
           Seller: <span className="address-chip">{truncateAddress(listing.seller, 6, 4)}</span>
         </div>
 
-        {/* Actions */}
         <div className="listing-card-actions">
           {isMine ? (
             <button

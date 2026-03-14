@@ -7,8 +7,8 @@
             "onlyOwner": false,
             "inputs": [
                 {
-                    "name": "nftContract",
-                    "type": "ADDRESS"
+                    "name": "collectionId",
+                    "type": "UINT256"
                 },
                 {
                     "name": "tokenId",
@@ -75,6 +75,83 @@
             ]
         },
         {
+            "name": "getListing",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "listingId",
+                    "type": "UINT256"
+                }
+            ],
+            "outputs": [
+                {
+                    "name": "seller",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "collectionId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "tokenId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "price",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "paymentToken",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "royaltyRecipient",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "royaltyBps",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "status",
+                    "type": "UINT256"
+                }
+            ]
+        },
+        {
+            "name": "getListingCount",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "count",
+                    "type": "UINT256"
+                }
+            ]
+        },
+        {
+            "name": "setLaunchpad",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "launchpad",
+                    "type": "ADDRESS"
+                }
+            ],
+            "outputs": [
+                {
+                    "name": "success",
+                    "type": "BOOL"
+                }
+            ]
+        },
+        {
             "name": "setFee",
             "type": "Function",
             "payable": false,
@@ -119,65 +196,6 @@
             ]
         },
         {
-            "name": "getListing",
-            "type": "View",
-            "payable": false,
-            "onlyOwner": false,
-            "inputs": [
-                {
-                    "name": "listingId",
-                    "type": "UINT256"
-                }
-            ],
-            "outputs": [
-                {
-                    "name": "seller",
-                    "type": "UINT256"
-                },
-                {
-                    "name": "nftContract",
-                    "type": "UINT256"
-                },
-                {
-                    "name": "tokenId",
-                    "type": "UINT256"
-                },
-                {
-                    "name": "price",
-                    "type": "UINT256"
-                },
-                {
-                    "name": "paymentToken",
-                    "type": "UINT256"
-                },
-                {
-                    "name": "royaltyRecipient",
-                    "type": "UINT256"
-                },
-                {
-                    "name": "royaltyBps",
-                    "type": "UINT256"
-                },
-                {
-                    "name": "status",
-                    "type": "UINT256"
-                }
-            ]
-        },
-        {
-            "name": "getListingCount",
-            "type": "View",
-            "payable": false,
-            "onlyOwner": false,
-            "inputs": [],
-            "outputs": [
-                {
-                    "name": "count",
-                    "type": "UINT256"
-                }
-            ]
-        },
-        {
             "name": "getPlatformFee",
             "type": "View",
             "payable": false,
@@ -186,19 +204,6 @@
             "outputs": [
                 {
                     "name": "feeBps",
-                    "type": "UINT256"
-                }
-            ]
-        },
-        {
-            "name": "getAccruedFees",
-            "type": "View",
-            "payable": false,
-            "onlyOwner": false,
-            "inputs": [],
-            "outputs": [
-                {
-                    "name": "accrued",
                     "type": "UINT256"
                 }
             ]

@@ -1,9 +1,10 @@
 // ═══════════════════════════════════════════════════════════
 // OPMarket — On-Chain Contract Service
 // ═══════════════════════════════════════════════════════════
-// Flow: getContract → contract.method() → simulation.sendTransaction
-// TransactionFactory auto-routes to OPWallet via window.opnet.web3.
-// NEVER call window.opnet directly. NEVER construct PSBTs.
+// Architecture:
+//   NFTLaunchpad — self-contained registry: registerCollection, mint, withdraw
+//   NFTMarketplace — secondary market: list, buy, cancel
+//   No external NFT contract required.
 
 import { getContract } from 'opnet';
 import { Address } from '@btc-vision/transaction';
@@ -12,10 +13,9 @@ import { getProvider, getNetworkConfig } from './opnetProvider';
 import { u256ToOpNetAddress } from './formatters';
 
 import marketplaceABI from '../../../contracts/abis/NFTMarketplace.abi.json';
-import baseNFTABI     from '../../../contracts/abis/BaseNFT.abi.json';
-import op721ABI       from '../../../contracts/abis/OP721.abi.json';
-import op20ABI        from '../../../contracts/abis/OP20.abi.json';
 import launchpadABI   from '../../../contracts/abis/NFTLaunchpad.abi.json';
+import op20ABI        from '../../../contracts/abis/OP20.abi.json';
+import testWBTCABI    from '../../../contracts/abis/TestWBTC.abi.json';
 
 // ── ABI normalisation ─────────────────────────────────────
 function normalise(abi) {
@@ -26,13 +26,11 @@ function normalise(abi) {
 }
 
 const MARKET_ABI    = normalise(marketplaceABI);
-const NFT_ABI       = normalise(op721ABI);
-const OP20_ABI      = normalise(op20ABI);
 const LAUNCHPAD_ABI = normalise(launchpadABI);
-const BASE_NFT_ABI  = normalise(baseNFTABI);
+const OP20_ABI      = normalise(op20ABI);
+const WBTC_ABI      = normalise(testWBTCABI);
 
-// ── Contract factories ────────────────────────────────────
-
+// ── Read-only contract factory ────────────────────────────
 function readContract(address, abi) {
   const p = getProvider();
   if (!p || !address) return null;
@@ -44,67 +42,57 @@ function readContract(address, abi) {
   }
 }
 
-// Cache resolved Address objects to avoid repeated RPC lookups per session.
+// ── Address resolution cache ──────────────────────────────
 const _addrCache = new Map();
 
-// Resolve any OPNet address (opt1s...) or hex pubkey (0x02.../0x03...) to an Address object.
-//
-// Accepted formats:
-//   opt1s...         — bech32 contract/wallet address  → looked up via getPublicKeyInfo
-//   0x02... / 0x03.. — 33-byte compressed public key   → decoded directly
-//
-// NOT accepted:
-//   0xc82f...        — 32-byte contract hash from the explorer.
-//                      Use the opt1s... bech32 address shown on the explorer instead.
+// Resolve any OPNet address to an Address object.
+// Supports:
+//   0x<64 hex> — contract hash (preferred for contracts)
+//   0x<66 hex starting 02/03> — compressed public key
+//   opt1s... — bech32 address (resolved via RPC)
 async function toAddress(addrOrHex) {
   if (!addrOrHex) throw new Error('Empty address provided.');
   if (_addrCache.has(addrOrHex)) return _addrCache.get(addrOrHex);
 
-  const hex = addrOrHex.startsWith('0x') ? addrOrHex.slice(2) : addrOrHex;
+  // 0x-prefixed hex — contract hash or compressed pubkey
+  if (addrOrHex.startsWith('0x')) {
+    const resolved = Address.fromString(addrOrHex);
+    _addrCache.set(addrOrHex, resolved);
+    return resolved;
+  }
 
-  // 33-byte compressed public key (66 hex chars, starts with 02 or 03)
+  const hex = addrOrHex;
+
+  // Compressed public key (33 bytes, 66 hex chars, no 0x prefix)
   if (hex.length === 66 && (hex.startsWith('02') || hex.startsWith('03'))) {
     const resolved = Address.fromString(addrOrHex);
     _addrCache.set(addrOrHex, resolved);
     return resolved;
   }
 
-  // 32-byte hash — this is a contract ID from the explorer, not a public key.
-  if (hex.length === 64) {
-    throw new Error(
-      `"${addrOrHex.slice(0, 12)}..." looks like a contract hash from the explorer. ` +
-      `Please use the opt1s... bech32 address instead — it's shown on the same explorer page.`
-    );
-  }
-
-  // Bech32 address (opt1s... / bc1q... etc.) — look up the on-chain public key via RPC.
+  // Bech32 address — resolve via RPC
   const p = getProvider();
   try {
-    const info = await p.getPublicKeyInfo(addrOrHex, false);
-    if (info) {
-      _addrCache.set(addrOrHex, info);
-      return info;
-    }
+    const info = await p.getPublicKeyInfo(addrOrHex, true);
+    if (info) { _addrCache.set(addrOrHex, info); return info; }
   } catch (e) {
     console.warn('[contractService] getPublicKeyInfo failed for', addrOrHex, e);
   }
 
   throw new Error(
-    `Public key for "${addrOrHex}" not found on-chain. ` +
-    `If this is a freshly deployed contract, paste its 33-byte hex public key (0x02... or 0x03...) instead.`
+    `Address "${addrOrHex}" not found on-chain. ` +
+    `Use a 0x contract hash or a deployed bech32 address.`
   );
 }
 
-async function resolveAddress(senderBech32) {
+// Resolve the caller's wallet public key for write transactions.
+async function resolveWallet(senderBech32) {
   const p = getProvider();
-
-  // Attempt 1: RPC lookup (works for wallets with on-chain history)
   try {
     const info = await p.getPublicKeyInfo(senderBech32, false);
     if (info) return info;
   } catch { /* fresh wallet — fall through */ }
 
-  // Attempt 2: Read keys directly from OPWallet
   if (typeof window !== 'undefined' && window.opnet?.web3?.getMLDSAPublicKey) {
     try {
       const [mldsaHex, legacyHex] = await Promise.all([
@@ -122,26 +110,25 @@ async function resolveAddress(senderBech32) {
 async function writeContract(address, abi, senderBech32) {
   const p = getProvider();
   if (!p || !address) return { contract: null, error: 'Contract address missing — check .env' };
-  const sender = await resolveAddress(senderBech32);
+  const sender = await resolveWallet(senderBech32);
   if (!sender) return {
     contract: null,
-    error: 'Could not resolve your wallet public key. Make sure OPWallet is unlocked and has sent at least one transaction on this network.',
+    error: 'Could not resolve wallet public key. Make sure OPWallet is unlocked and has sent at least one transaction.',
   };
   try {
     return { contract: getContract(address, abi, p, getNetworkConfig(), sender), error: null };
   } catch (e) {
-    console.warn('[contractService] writeContract failed:', address, e);
     return { contract: null, error: e.message || 'Failed to load contract' };
   }
 }
 
-// ── Generic execute helper ────────────────────────────────
+// ── Generic write helper ──────────────────────────────────
 async function executeOnChain(contractAddress, abi, method, args, senderAddress) {
   if (typeof window === 'undefined' || !window.opnet?.web3) {
     throw new Error('OPWallet not detected. Install OPWallet to submit transactions.');
   }
-  const { contract: c, error: contractError } = await writeContract(contractAddress, abi, senderAddress);
-  if (!c) throw new Error(contractError);
+  const { contract: c, error } = await writeContract(contractAddress, abi, senderAddress);
+  if (!c) throw new Error(error);
 
   let sim;
   try {
@@ -158,34 +145,53 @@ async function executeOnChain(contractAddress, abi, method, args, senderAddress)
     maximumAllowedSatToSpend: 0n,
     network: getNetworkConfig(),
   });
-  return receipt.transactionId;
+  return receipt?.transactionId ?? '(check wallet)';
 }
 
-// ── Listing data model ────────────────────────────────────
+// ── Normalise listing from contract response ───────────────
 function normaliseListing(id, props) {
-  const seller           = u256ToOpNetAddress(props.seller);
-  const nftContract      = u256ToOpNetAddress(props.nftContract);
-  const paymentToken     = u256ToOpNetAddress(props.paymentToken);
-  const royaltyRecipient = u256ToOpNetAddress(props.royaltyRecipient);
-
   return {
     id,
-    seller,
-    sellerHash:      props.seller?.toString()   || '0',
-    nftContract,
-    nftContractHash: props.nftContract?.toString() || '0',
-    tokenId:         BigInt(props.tokenId  ?? 0),
-    price:           BigInt(props.price    ?? 0),
-    paymentToken,
+    seller:           u256ToOpNetAddress(props.seller),
+    sellerHash:       props.seller?.toString() || '0',
+    collectionId:     BigInt(props.collectionId ?? 0),
+    tokenId:          BigInt(props.tokenId     ?? 0),
+    price:            BigInt(props.price       ?? 0),
+    paymentToken:     u256ToOpNetAddress(props.paymentToken),
     paymentTokenHash: props.paymentToken?.toString() || '0',
-    royaltyRecipient,
-    royaltyBps:      Number(props.royaltyBps ?? 0),
-    status:          BigInt(props.status   ?? 0),
-    isActive:        BigInt(props.status   ?? 0) === LISTING_STATUS.ACTIVE,
+    royaltyRecipient: u256ToOpNetAddress(props.royaltyRecipient),
+    royaltyBps:       Number(props.royaltyBps  ?? 0),
+    status:           BigInt(props.status      ?? 0),
+    isActive:         BigInt(props.status      ?? 0) === LISTING_STATUS.ACTIVE,
   };
 }
 
-// ── Read: Marketplace ─────────────────────────────────────
+// ── Normalise collection from contract response ────────────
+function normaliseCollection(id, props, strings) {
+  return {
+    id,
+    creator:      u256ToOpNetAddress(props.creator),
+    creatorHash:  props.creator?.toString() || '0',
+    mintPrice:    BigInt(props.mintPrice    ?? 0),
+    paymentToken: u256ToOpNetAddress(props.paymentToken),
+    maxSupply:    BigInt(props.maxSupply    ?? 0),
+    minted:       BigInt(props.minted       ?? 0),
+    startBlock:   BigInt(props.startBlock   ?? 0),
+    endBlock:     BigInt(props.endBlock     ?? 0),
+    royaltyBps:   Number(props.royaltyBps   ?? 0),
+    maxPerWallet: BigInt(props.maxPerWallet ?? 0),
+    proceeds:     BigInt(props.proceeds     ?? 0),
+    isRegistered: BigInt(props.creator      ?? 0) !== 0n,
+    // From getCollectionStrings
+    name:         strings?.name     ?? '',
+    symbol:       strings?.symbol   ?? '',
+    imageURI:     strings?.imageURI ?? '',
+  };
+}
+
+// ═══════════════════════════════════════════════════════════
+// READ: Marketplace
+// ═══════════════════════════════════════════════════════════
 
 export async function getListingCount() {
   const c = readContract(CONTRACTS.MARKETPLACE, MARKET_ABI);
@@ -193,10 +199,7 @@ export async function getListingCount() {
   try {
     const r = await c.getListingCount();
     return Number(r?.properties?.count ?? 0);
-  } catch (e) {
-    console.warn('[contractService] getListingCount failed:', e);
-    return 0;
-  }
+  } catch { return 0; }
 }
 
 export async function getListing(id) {
@@ -223,67 +226,65 @@ export async function getAllActiveListings() {
   return listings;
 }
 
-// ── Read: OP721 (NFT collections) ─────────────────────────
+// ═══════════════════════════════════════════════════════════
+// READ: Launchpad
+// ═══════════════════════════════════════════════════════════
 
-export async function getNFTBalance(collectionAddr, ownerAddr) {
-  const c = readContract(collectionAddr, NFT_ABI);
-  if (!c) return 0n;
+export async function getCollectionCount() {
+  const c = readContract(CONTRACTS.LAUNCHPAD, LAUNCHPAD_ABI);
+  if (!c) return 0;
   try {
-    const r = await c.balanceOf(ownerAddr);
+    const r = await c.getCollectionCount();
+    return Number(r?.properties?.count ?? 0);
+  } catch { return 0; }
+}
+
+export async function getCollection(collectionId) {
+  const c = readContract(CONTRACTS.LAUNCHPAD, LAUNCHPAD_ABI);
+  if (!c) return null;
+  try {
+    const [numR, strR] = await Promise.all([
+      c.getCollection(BigInt(collectionId)),
+      c.getCollectionStrings(BigInt(collectionId)),
+    ]);
+    if (!numR?.properties) return null;
+    return normaliseCollection(collectionId, numR.properties, strR?.properties);
+  } catch (e) {
+    console.warn('[contractService] getCollection failed:', e);
+    return null;
+  }
+}
+
+export async function getAllCollections() {
+  const count = await getCollectionCount();
+  if (!count) return [];
+  const ids = Array.from({ length: count }, (_, i) => i);
+  const results = await Promise.all(ids.map(id => getCollection(id)));
+  return results.filter(Boolean);
+}
+
+export async function getLaunchpadBalance(collectionId, ownerAddr) {
+  const c = readContract(CONTRACTS.LAUNCHPAD, LAUNCHPAD_ABI);
+  if (!c || !ownerAddr) return 0n;
+  try {
+    const ownerResolved = await toAddress(ownerAddr);
+    const r = await c.balanceOf(BigInt(collectionId), ownerResolved);
     return BigInt(r?.properties?.balance ?? 0);
-  } catch {
-    return 0n;
-  }
+  } catch { return 0n; }
 }
 
-export async function getTokenOfOwnerByIndex(collectionAddr, ownerAddr, index) {
-  const c = readContract(collectionAddr, NFT_ABI);
+export async function ownerOf(collectionId, tokenId) {
+  const c = readContract(CONTRACTS.LAUNCHPAD, LAUNCHPAD_ABI);
   if (!c) return null;
   try {
-    const r = await c.tokenOfOwnerByIndex(ownerAddr, BigInt(index));
-    return BigInt(r?.properties?.tokenId ?? 0);
-  } catch {
-    return null;
-  }
+    const r = await c.ownerOf(BigInt(collectionId), BigInt(tokenId));
+    return r?.properties?.owner ?? null;
+  } catch { return null; }
 }
 
-export async function getTokenURI(collectionAddr, tokenId) {
-  const c = readContract(collectionAddr, NFT_ABI);
-  if (!c) return null;
-  try {
-    const r = await c.tokenURI(BigInt(tokenId));
-    return r?.properties?.uri || null;
-  } catch {
-    return null;
-  }
-}
-
-export async function isApprovedForAll(collectionAddr, ownerAddr, operatorAddr) {
-  const c = readContract(collectionAddr, NFT_ABI);
-  if (!c) return false;
-  try {
-    const r = await c.isApprovedForAll(ownerAddr, operatorAddr);
-    return Boolean(r?.properties?.approved);
-  } catch {
-    return false;
-  }
-}
-
-// Get all NFTs owned by an address in a given collection
-export async function getOwnedNFTs(collectionAddr, ownerAddr) {
-  const balance = await getNFTBalance(collectionAddr, ownerAddr);
-  if (!balance) return [];
-  const tokens = [];
-  for (let i = 0; i < Number(balance); i++) {
-    const tokenId = await getTokenOfOwnerByIndex(collectionAddr, ownerAddr, i);
-    if (tokenId !== null) {
-      tokens.push({ collectionAddr, tokenId });
-    }
-  }
-  return tokens;
-}
-
-// ── Read: OP20 (payment tokens) ───────────────────────────
+// ═══════════════════════════════════════════════════════════
+// READ: OP20 (payment tokens)
+// ═══════════════════════════════════════════════════════════
 
 export async function getTokenBalance(tokenAddr, ownerAddr) {
   const c = readContract(tokenAddr, OP20_ABI);
@@ -291,20 +292,7 @@ export async function getTokenBalance(tokenAddr, ownerAddr) {
   try {
     const r = await c.balanceOf(ownerAddr);
     return BigInt(r?.properties?.balance ?? 0);
-  } catch {
-    return null;
-  }
-}
-
-export async function getTokenAllowance(tokenAddr, ownerAddr, spenderAddr) {
-  const c = readContract(tokenAddr, OP20_ABI);
-  if (!c) return 0n;
-  try {
-    const r = await c.allowance(ownerAddr, spenderAddr);
-    return BigInt(r?.properties?.remaining ?? 0);
-  } catch {
-    return 0n;
-  }
+  } catch { return null; }
 }
 
 export async function getTokenSymbol(tokenAddr) {
@@ -313,79 +301,109 @@ export async function getTokenSymbol(tokenAddr) {
   try {
     const r = await c.symbol();
     return r?.properties?.symbol || '???';
-  } catch {
-    return '???';
-  }
+  } catch { return '???'; }
 }
 
-// ── Metadata fetcher ──────────────────────────────────────
-// Fetches ERC-721-style JSON metadata from a tokenURI.
-// OPWallet requires: { name, description, image }
-const metaCache = new Map();
-
-export async function fetchNFTMetadata(tokenUri) {
-  if (!tokenUri) return null;
-  if (metaCache.has(tokenUri)) return metaCache.get(tokenUri);
+export async function getTokenAllowance(tokenAddr, ownerAddr, spenderAddr) {
+  const c = readContract(tokenAddr, OP20_ABI);
+  if (!c) return 0n;
   try {
-    // Convert IPFS URIs to HTTP gateway
-    const url = tokenUri
-      .replace('ipfs://', 'https://ipfs.io/ipfs/')
-      .replace('ar://', 'https://arweave.net/');
-    const resp = await fetch(url, { signal: AbortSignal.timeout(8000) });
-    if (!resp.ok) return null;
-    const meta = await resp.json();
-    metaCache.set(tokenUri, meta);
-    return meta;
-  } catch {
-    return null;
-  }
+    const r = await c.allowance(ownerAddr, spenderAddr);
+    return BigInt(r?.properties?.remaining ?? 0);
+  } catch { return 0n; }
 }
 
-// ── Write: NFT approval ───────────────────────────────────
+// ═══════════════════════════════════════════════════════════
+// WRITE: Launchpad
+// ═══════════════════════════════════════════════════════════
 
-export async function approveNFTForMarketplace(collectionAddr, senderAddr) {
+export async function registerCollection(senderAddr, {
+  name, symbol, imageURI, maxSupply, mintPrice, paymentToken,
+  startBlock, endBlock, royaltyBps, maxPerWallet,
+}) {
+  const { contract: c, error } = await writeContract(CONTRACTS.LAUNCHPAD, LAUNCHPAD_ABI, senderAddr);
+  if (!c) throw new Error(error);
+
+  let sim;
+  try {
+    sim = await c.registerCollection(
+      name,
+      symbol,
+      imageURI || '',
+      BigInt(maxSupply),
+      BigInt(mintPrice),
+      await toAddress(paymentToken),
+      BigInt(startBlock),
+      BigInt(endBlock),
+      BigInt(royaltyBps || 0),
+      BigInt(maxPerWallet || 0),
+    );
+  } catch (e) {
+    throw new Error(`Simulation failed (registerCollection): ${e.message}`);
+  }
+  if (sim.revert) throw new Error(`Transaction would revert: ${sim.revert}`);
+
+  const collectionId = sim?.properties?.collectionId ?? null;
+
+  const receipt = await sim.sendTransaction({
+    signer: null,
+    mldsaSigner: null,
+    refundTo: senderAddr,
+    maximumAllowedSatToSpend: 0n,
+    network: getNetworkConfig(),
+  });
+
+  return {
+    txId: receipt?.transactionId ?? '(check wallet)',
+    collectionId,
+  };
+}
+
+export async function mintFromLaunchpad(senderAddr, collectionId, quantity) {
   return executeOnChain(
-    collectionAddr,
-    NFT_ABI,
-    'setApprovalForAll',
-    [await toAddress(CONTRACTS.MARKETPLACE), true],
+    CONTRACTS.LAUNCHPAD,
+    LAUNCHPAD_ABI,
+    'mint',
+    [BigInt(collectionId), BigInt(quantity)],
     senderAddr,
   );
 }
 
-// ── Write: OP20 approval ──────────────────────────────────
+export async function withdrawProceeds(senderAddr, collectionId) {
+  return executeOnChain(
+    CONTRACTS.LAUNCHPAD,
+    LAUNCHPAD_ABI,
+    'withdraw',
+    [BigInt(collectionId)],
+    senderAddr,
+  );
+}
 
-export async function approveTokenForMarketplace(tokenAddr, amount, senderAddr) {
+export async function approveTokenForLaunchpad(tokenAddr, amount, senderAddr) {
   return executeOnChain(
     tokenAddr,
     OP20_ABI,
     'increaseAllowance',
-    [await toAddress(CONTRACTS.MARKETPLACE), BigInt(amount)],
+    [await toAddress(CONTRACTS.LAUNCHPAD), BigInt(amount)],
     senderAddr,
   );
 }
 
-// ── Write: Marketplace ────────────────────────────────────
+// ═══════════════════════════════════════════════════════════
+// WRITE: Marketplace
+// ═══════════════════════════════════════════════════════════
 
-export async function listNFT(
-  senderAddr,
-  nftContract,
-  tokenId,
-  price,
-  paymentToken,
-  royaltyRecipient,
-  royaltyBps,
-) {
+export async function listNFT(senderAddr, collectionId, tokenId, price, paymentToken, royaltyRecipient, royaltyBps) {
   return executeOnChain(
     CONTRACTS.MARKETPLACE,
     MARKET_ABI,
     'list',
     [
-      await toAddress(nftContract),
+      BigInt(collectionId),
       BigInt(tokenId),
       BigInt(price),
       await toAddress(paymentToken),
-      await toAddress(royaltyRecipient || CONTRACTS.MARKETPLACE),
+      await toAddress(royaltyRecipient || CONTRACTS.LAUNCHPAD),
       BigInt(royaltyBps || 0),
     ],
     senderAddr,
@@ -412,151 +430,46 @@ export async function cancelListing(senderAddr, listingId) {
   );
 }
 
-// ── Write: BaseNFT ────────────────────────────────────────
-
-export async function mintNFT(collectionAddr, senderAddr, toAddr, quantity) {
-  return executeOnChain(
-    collectionAddr,
-    BASE_NFT_ABI,
-    'mintTo',
-    [toAddr, BigInt(quantity)],
-    senderAddr,
-  );
-}
-
-// ── Read: OP721 metadata ───────────────────────────────────
-
-export async function getNFTName(collectionAddr) {
-  const c = readContract(collectionAddr, NFT_ABI);
-  if (!c) return null;
-  try {
-    const r = await c.name();
-    return r?.properties?.name || null;
-  } catch { return null; }
-}
-
-export async function getNFTCollectionInfo(collectionAddr) {
-  const c = readContract(collectionAddr, NFT_ABI);
-  if (!c) return null;
-  try {
-    const r = await c.collectionInfo();
-    return r?.properties || null;
-  } catch { return null; }
-}
-
-// ── Read: Launchpad ────────────────────────────────────────
-
-export async function getCollection(nftContractAddr) {
-  const c = readContract(CONTRACTS.LAUNCHPAD, LAUNCHPAD_ABI);
-  if (!c) return null;
-  try {
-    const r = await c.getCollection(nftContractAddr);
-    if (!r?.properties) return null;
-    const p = r.properties;
-    return {
-      creator:      u256ToOpNetAddress(p.creator),
-      paymentToken: u256ToOpNetAddress(p.paymentToken),
-      mintPrice:    BigInt(p.mintPrice  ?? 0),
-      maxSupply:    BigInt(p.maxSupply  ?? 0),
-      minted:       BigInt(p.minted    ?? 0),
-      startBlock:   BigInt(p.startBlock ?? 0),
-      endBlock:     BigInt(p.endBlock  ?? 0),
-      royaltyBps:   Number(p.royaltyBps ?? 0),
-      proceeds:     BigInt(p.proceeds  ?? 0),
-      maxPerWallet: BigInt(p.maxPerWallet ?? 0),
-      isRegistered: BigInt(p.creator ?? 0) !== 0n,
-    };
-  } catch (e) {
-    console.warn('[contractService] getCollection failed:', e);
-    return null;
-  }
-}
-
-export async function getLaunchpadMinted(nftContractAddr) {
-  const c = readContract(CONTRACTS.LAUNCHPAD, LAUNCHPAD_ABI);
-  if (!c) return 0n;
-  try {
-    const r = await c.getMinted(nftContractAddr);
-    return BigInt(r?.properties?.minted ?? 0);
-  } catch { return 0n; }
-}
-
-export async function getWalletMintCount(nftContractAddr, walletAddr) {
-  const c = readContract(CONTRACTS.LAUNCHPAD, LAUNCHPAD_ABI);
-  if (!c) return 0n;
-  try {
-    const r = await c.getWalletMintCount(nftContractAddr, walletAddr);
-    return BigInt(r?.properties?.minted ?? 0);
-  } catch { return 0n; }
-}
-
-// ── Write: Launchpad ───────────────────────────────────────
-
-export async function registerCollection(
-  senderAddr,
-  nftContract,
-  mintPrice,
-  paymentToken,
-  maxSupply,
-  startBlock,
-  endBlock,
-  royaltyBps,
-  maxPerWallet,
-) {
-  return executeOnChain(
-    CONTRACTS.LAUNCHPAD,
-    LAUNCHPAD_ABI,
-    'register',
-    [
-      await toAddress(nftContract),
-      BigInt(mintPrice),
-      await toAddress(paymentToken),
-      BigInt(maxSupply),
-      BigInt(startBlock),
-      BigInt(endBlock),
-      BigInt(royaltyBps),
-      BigInt(maxPerWallet),
-    ],
-    senderAddr,
-  );
-}
-
-export async function mintFromLaunchpad(senderAddr, nftContract, quantity) {
-  return executeOnChain(
-    CONTRACTS.LAUNCHPAD,
-    LAUNCHPAD_ABI,
-    'mint',
-    [await toAddress(nftContract), BigInt(quantity)],
-    senderAddr,
-  );
-}
-
-export async function withdrawProceeds(senderAddr, nftContract) {
-  return executeOnChain(
-    CONTRACTS.LAUNCHPAD,
-    LAUNCHPAD_ABI,
-    'withdraw',
-    [await toAddress(nftContract)],
-    senderAddr,
-  );
-}
-
-export async function setNFTMinter(collectionAddr, senderAddr, minterAddr) {
-  return executeOnChain(
-    collectionAddr,
-    BASE_NFT_ABI,
-    'setMinter',
-    [await toAddress(minterAddr)],
-    senderAddr,
-  );
-}
-
-export async function approveTokenForLaunchpad(tokenAddr, amount, senderAddr) {
+export async function approveTokenForMarketplace(tokenAddr, amount, senderAddr) {
   return executeOnChain(
     tokenAddr,
     OP20_ABI,
     'increaseAllowance',
-    [await toAddress(CONTRACTS.LAUNCHPAD), BigInt(amount)],
+    [await toAddress(CONTRACTS.MARKETPLACE), BigInt(amount)],
     senderAddr,
   );
+}
+
+// ═══════════════════════════════════════════════════════════
+// WRITE: Faucet (test WBTC)
+// ═══════════════════════════════════════════════════════════
+
+export async function mintFromFaucet(senderAddr) {
+  return executeOnChain(
+    CONTRACTS.WBTC_TOKEN,
+    WBTC_ABI,
+    'faucet',
+    [],
+    senderAddr,
+  );
+}
+
+// ═══════════════════════════════════════════════════════════
+// Metadata fetcher (IPFS / Arweave)
+// ═══════════════════════════════════════════════════════════
+const metaCache = new Map();
+
+export async function fetchNFTMetadata(tokenUri) {
+  if (!tokenUri) return null;
+  if (metaCache.has(tokenUri)) return metaCache.get(tokenUri);
+  try {
+    const url = tokenUri
+      .replace('ipfs://', 'https://ipfs.io/ipfs/')
+      .replace('ar://', 'https://arweave.net/');
+    const resp = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (!resp.ok) return null;
+    const meta = await resp.json();
+    metaCache.set(tokenUri, meta);
+    return meta;
+  } catch { return null; }
 }
