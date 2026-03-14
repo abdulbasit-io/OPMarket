@@ -12,23 +12,17 @@ import { CONTRACTS, LISTING_STATUS, TOKEN_DECIMALS } from './constants';
 import { getProvider, getNetworkConfig } from './opnetProvider';
 import { u256ToOpNetAddress } from './formatters';
 
-import marketplaceABI from '../../../contracts/abis/NFTMarketplace.abi.json';
-import launchpadABI   from '../../../contracts/abis/NFTLaunchpad.abi.json';
-import op20ABI        from '../../../contracts/abis/OP20.abi.json';
-import testWBTCABI    from '../../../contracts/abis/TestWBTC.abi.json';
+import {
+  NFTLaunchpadAbi,
+  NFTMarketplaceAbi,
+  OP20Abi,
+  TestWBTCAbi,
+} from './abis.js';
 
-// ── ABI normalisation ─────────────────────────────────────
-function normalise(abi) {
-  const fns = abi.functions || abi;
-  return Array.isArray(fns)
-    ? fns.map(fn => ({ ...fn, type: (fn.type || 'function').toLowerCase() }))
-    : fns;
-}
-
-const MARKET_ABI    = normalise(marketplaceABI);
-const LAUNCHPAD_ABI = normalise(launchpadABI);
-const OP20_ABI      = normalise(op20ABI);
-const WBTC_ABI      = normalise(testWBTCABI);
+const MARKET_ABI    = NFTMarketplaceAbi;
+const LAUNCHPAD_ABI = NFTLaunchpadAbi;
+const OP20_ABI      = OP20Abi;
+const WBTC_ABI      = TestWBTCAbi;
 
 // ── Read-only contract factory ────────────────────────────
 function readContract(address, abi) {
@@ -54,24 +48,16 @@ async function toAddress(addrOrHex) {
   if (!addrOrHex) throw new Error('Empty address provided.');
   if (_addrCache.has(addrOrHex)) return _addrCache.get(addrOrHex);
 
-  // 0x-prefixed hex — contract hash or compressed pubkey
-  if (addrOrHex.startsWith('0x')) {
-    const resolved = Address.fromString(addrOrHex);
-    _addrCache.set(addrOrHex, resolved);
-    return resolved;
-  }
-
-  const hex = addrOrHex;
-
-  // Compressed public key (33 bytes, 66 hex chars, no 0x prefix)
-  if (hex.length === 66 && (hex.startsWith('02') || hex.startsWith('03'))) {
-    const resolved = Address.fromString(addrOrHex);
-    _addrCache.set(addrOrHex, resolved);
-    return resolved;
-  }
-
-  // Bech32 address — resolve via RPC
   const p = getProvider();
+
+  // Compressed public key (33 bytes 02/03 prefix, no 0x)
+  if (addrOrHex.length === 66 && (addrOrHex.startsWith('02') || addrOrHex.startsWith('03'))) {
+    const resolved = Address.fromString(addrOrHex);
+    _addrCache.set(addrOrHex, resolved);
+    return resolved;
+  }
+
+  // Bech32 opt1s... or 0x hash — resolve via RPC so we get the correct P2OP Address object
   try {
     const info = await p.getPublicKeyInfo(addrOrHex, true);
     if (info) { _addrCache.set(addrOrHex, info); return info; }
@@ -79,9 +65,16 @@ async function toAddress(addrOrHex) {
     console.warn('[contractService] getPublicKeyInfo failed for', addrOrHex, e);
   }
 
+  // Last resort: direct parse (works for reading but may produce wrong type for write params)
+  if (addrOrHex.startsWith('0x')) {
+    const resolved = Address.fromString(addrOrHex);
+    _addrCache.set(addrOrHex, resolved);
+    return resolved;
+  }
+
   throw new Error(
     `Address "${addrOrHex}" not found on-chain. ` +
-    `Use a 0x contract hash or a deployed bech32 address.`
+    `Use the opt1s... bech32 address from the OPNet explorer.`
   );
 }
 
@@ -148,6 +141,15 @@ async function executeOnChain(contractAddress, abi, method, args, senderAddress)
   return receipt?.transactionId ?? '(check wallet)';
 }
 
+// Convert a u256 property to a 0x-prefixed 32-byte hex string.
+// Used for addresses stored on-chain so they match CONTRACTS.* keys in constants.
+function u256ToHex(val) {
+  if (val === undefined || val === null) return null;
+  const n = BigInt(val.toString());
+  if (n === 0n) return null;
+  return '0x' + n.toString(16).padStart(64, '0');
+}
+
 // ── Normalise listing from contract response ───────────────
 function normaliseListing(id, props) {
   return {
@@ -157,8 +159,7 @@ function normaliseListing(id, props) {
     collectionId:     BigInt(props.collectionId ?? 0),
     tokenId:          BigInt(props.tokenId     ?? 0),
     price:            BigInt(props.price       ?? 0),
-    paymentToken:     u256ToOpNetAddress(props.paymentToken),
-    paymentTokenHash: props.paymentToken?.toString() || '0',
+    paymentToken:     u256ToHex(props.paymentToken),
     royaltyRecipient: u256ToOpNetAddress(props.royaltyRecipient),
     royaltyBps:       Number(props.royaltyBps  ?? 0),
     status:           BigInt(props.status      ?? 0),
@@ -173,7 +174,7 @@ function normaliseCollection(id, props, strings) {
     creator:      u256ToOpNetAddress(props.creator),
     creatorHash:  props.creator?.toString() || '0',
     mintPrice:    BigInt(props.mintPrice    ?? 0),
-    paymentToken: u256ToOpNetAddress(props.paymentToken),
+    paymentToken: u256ToHex(props.paymentToken),
     maxSupply:    BigInt(props.maxSupply    ?? 0),
     minted:       BigInt(props.minted       ?? 0),
     startBlock:   BigInt(props.startBlock   ?? 0),

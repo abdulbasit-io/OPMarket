@@ -82,10 +82,21 @@ export default function LaunchPage() {
     if (Number(form.royaltyPct) > 10) return setError('Royalty cannot exceed 10%.');
     if (!paymentTokenAddr) return setError('Payment token address is required.');
     if (!CONTRACTS.LAUNCHPAD) return setError('VITE_LAUNCHPAD_CONTRACT not set in .env');
-    if (!currentBlock) return setError('Could not fetch current block. Check your connection.');
 
     setLoading(true);
     try {
+      // Re-fetch block number at launch time in case page-load fetch failed
+      let block = currentBlock;
+      if (!block) {
+        block = await getBlockNumber();
+        if (block) setCurrentBlock(Number(block));
+      }
+      if (!block) throw new Error('Could not fetch current block. Check your connection and try again.');
+
+      const dBlocks   = Math.ceil(Number(form.durationHours || 0) * BLOCKS_PER_HOUR);
+      const sBlock    = Number(block) + 2;
+      const eBlock    = sBlock + dBlocks;
+
       const mintPriceRaw = toRaw(form.mintPrice || '0', TOKEN_DECIMALS);
       const royaltyBps   = Math.round(Number(form.royaltyPct) * 100);
 
@@ -96,8 +107,8 @@ export default function LaunchPage() {
         maxSupply:    form.maxSupply,
         mintPrice:    mintPriceRaw,
         paymentToken: paymentTokenAddr,
-        startBlock:   startBlock,
-        endBlock:     endBlock,
+        startBlock:   sBlock,
+        endBlock:     eBlock,
         royaltyBps:   royaltyBps,
         maxPerWallet: form.maxPerWallet || 0,
       });

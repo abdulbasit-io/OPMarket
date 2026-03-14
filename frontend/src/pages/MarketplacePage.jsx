@@ -1,7 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
 import ListingCard from '../components/ListingCard';
 import BuyModal from '../components/BuyModal';
-import { getAllActiveListings, cancelListing } from '../utils/contractService';
+import CollectionCard from '../components/CollectionCard';
+import { getAllActiveListings, getAllCollections, cancelListing, getTokenSymbol } from '../utils/contractService';
+import { PAYMENT_TOKENS } from '../utils/constants';
 import { useWallet } from '../context/WalletContext';
 
 const SORT_OPTIONS = [
@@ -20,7 +22,10 @@ function sortListings(listings, sort) {
 export default function MarketplacePage() {
   const { isConnected, address, refreshBalance } = useWallet();
 
+  const [view,       setView]       = useState('listings'); // 'listings' | 'collections'
   const [listings,   setListings]   = useState([]);
+  const [collections, setCollections] = useState([]);
+  const [symbols,    setSymbols]    = useState({}); // coll.id -> string
   const [loading,    setLoading]    = useState(true);
   const [sort,       setSort]       = useState('recent');
   const [buyTarget,  setBuyTarget]  = useState(null);
@@ -31,10 +36,29 @@ export default function MarketplacePage() {
     setLoading(true);
     setError('');
     try {
-      const all = await getAllActiveListings();
-      setListings(all);
+      const [allListings, allCollections] = await Promise.all([
+        getAllActiveListings(),
+        getAllCollections(),
+      ]);
+      setListings(allListings);
+      setCollections(allCollections);
+      
+      // Resolve payment tokens for collections
+      const syms = {};
+      for (const c of allCollections) {
+        if (c.paymentToken) {
+          const known = PAYMENT_TOKENS[c.paymentToken];
+          if (known) {
+            syms[c.id] = known.symbol;
+          } else {
+            const s = await getTokenSymbol(c.paymentToken);
+            if (s) syms[c.id] = s;
+          }
+        }
+      }
+      setSymbols(syms);
     } catch (e) {
-      setError('Failed to load listings. Is your RPC reachable?');
+      setError('Failed to load marketplace data. Is your RPC reachable?');
       console.error(e);
     } finally {
       setLoading(false);
@@ -64,18 +88,34 @@ export default function MarketplacePage() {
         <div className="page-header">
           <div>
             <h1 className="page-title">Marketplace</h1>
-            <p className="page-subtitle">Bitcoin L1 NFT listings — non-custodial, on-chain.</p>
+            <p className="page-subtitle">Bitcoin L1 NFTs — Collections & Secondary Market</p>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <select
-              className="form-select"
-              value={sort}
-              onChange={e => setSort(e.target.value)}
-            >
-              {SORT_OPTIONS.map(o => (
-                <option key={o.value} value={o.value}>{o.label}</option>
-              ))}
-            </select>
+            <div className="tabs" style={{ display: 'flex', background: 'rgba(255,255,255,0.03)', borderRadius: 'var(--r-md)', padding: 4 }}>
+              <button 
+                className={`btn btn-sm ${view === 'collections' ? 'btn-primary' : 'btn-ghost'}`} 
+                onClick={() => setView('collections')}
+              >
+                Launchpad
+              </button>
+              <button 
+                className={`btn btn-sm ${view === 'listings' ? 'btn-primary' : 'btn-ghost'}`} 
+                onClick={() => setView('listings')}
+              >
+                Secondary
+              </button>
+            </div>
+            {view === 'listings' && (
+              <select
+                className="form-select"
+                value={sort}
+                onChange={e => setSort(e.target.value)}
+              >
+                {SORT_OPTIONS.map(o => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+            )}
             <button
               className="btn btn-ghost btn-sm"
               onClick={loadListings}
@@ -114,23 +154,44 @@ export default function MarketplacePage() {
               </div>
             ))}
           </div>
-        ) : sorted.length === 0 ? (
-          <div className="empty-state">
-            <div className="empty-icon">🖼</div>
-            <h3>No listings yet</h3>
-            <p>Be the first to list an NFT on Bitcoin L1.</p>
-          </div>
+        ) : view === 'listings' ? (
+          sorted.length === 0 ? (
+            <div className="empty-state">
+              <div className="empty-icon">🖼</div>
+              <h3>No listings yet</h3>
+              <p>Be the first to list an NFT on Bitcoin L1.</p>
+            </div>
+          ) : (
+            <div className="nft-grid">
+              {sorted.map(l => (
+                <ListingCard
+                  key={l.id}
+                  listing={l}
+                  onBuy={setBuyTarget}
+                  onCancel={handleCancelListing}
+                />
+              ))}
+            </div>
+          )
         ) : (
-          <div className="nft-grid">
-            {sorted.map(l => (
-              <ListingCard
-                key={l.id}
-                listing={l}
-                onBuy={setBuyTarget}
-                onCancel={handleCancelListing}
-              />
-            ))}
-          </div>
+          collections.length === 0 ? (
+            <div className="empty-state">
+              <div className="empty-icon">🚀</div>
+              <h3>No collections launched</h3>
+              <p>Be the first to launch a collection on OPMarket.</p>
+            </div>
+          ) : (
+            <div className="nft-grid">
+              {collections.map(c => (
+                <CollectionCard
+                  key={c.id}
+                  collection={c}
+                  symbol={symbols[c.id]}
+                  decimals={PAYMENT_TOKENS[c.paymentToken]?.decimals}
+                />
+              ))}
+            </div>
+          )
         )}
       </div>
 
